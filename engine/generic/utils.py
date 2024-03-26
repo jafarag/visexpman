@@ -1,10 +1,11 @@
-import sys,platform
+import sys
 import math
 import random
 import numpy
 import os.path
 import os
 import time
+import datetime
 import unittest
 import pkgutil
 import inspect
@@ -14,13 +15,85 @@ import copy
 import select
 import subprocess
 import cPickle as pickle
+import zlib
+import urllib2
+try:
+    import blosc as compressor
+except ImportError:
+    import zlib as compressor
 if os.name == 'nt':
-    import win32process
-    import win32api
+    try:
+        import win32process
+        import win32api
+    except ImportError:
+        pass
+ENABLE_COMPRESSION=False
+import fileop
+import introspect
+import platform
 
-import file
+def is_network_available():
+    if platform.system() == 'Windows':
+        try:
+            proxy = urllib2.ProxyHandler({'http': 'iproxy.fmi.ch:8080'})
+            opener = urllib2.build_opener(proxy)
+            urllib2.install_opener(opener)
+            urllib2.urlopen('http://www.google.com')
+            return True
+        except:
+            return False
+    elif platform.system() == 'Linux' or platform.system()=='Darwin':
+        try:
+            response=urllib2.urlopen('http://gnu.org',timeout=1)
+            return True
+        except :
+            return False
+    else:
+        raise NotImplementedError('')
+        
+def get_ip():
+    '''
+    Assuming that internet connection is available
+    '''
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    addresses =['rzws.fmi.ch', 'google.com', '127.0.0.1']#Assuming to be in FMI, otherwise assuming connected to internet, finally trying localhost
+    for address in addresses:
+        try:
+            s.connect((address, 0))
+            break
+        except:
+            continue
+    return s.getsockname()[0]
+        
+def resample_array(array, factor):
+    '''
+    Increases sampling rate of array with factor
+    '''
+    if factor == 1:
+        return arrayutils.py
+    else:
+        return numpy.array([array]*int(factor)).flatten('F')
+    
+def generate_lut(x, min = 0.0, max = 1.0, gamma = 1.0, brightness = 0.5, contrast = 0.0):
+    max_ = max - contrast
+    min_ = min + contrast
+    b =-min*(1.0/(max_-min_))
+    b = b + brightness - 0.5
+    a = (1.0/(max_-min_))
+    y = a * x + b
+    y = y ** gamma
+    y = numpy.where(y < 0.0,  0.0,  y)
+    y = numpy.where(y > 1.0,  1.0,  y)
+    return y
 
-import visexpman.users.zoltan.test.unit_test_runner as unit_test_runner
+def get_window_title(config):
+    from visexpman.engine import MachineConfigError
+    if not hasattr(config, 'user_interface_name'):
+        raise MachineConfigError('user_interface_name is missing from config')
+    if not config.USER_INTERFACE_NAMES.has_key(config.user_interface_name):
+        raise MachineConfigError('Unknown application name: {0}' .format(config.user_interface_name))
+    return '{0} - {1} - {2}' .format(config.USER_INTERFACE_NAMES[config.user_interface_name], config.user, config.__class__.__name__)
 
 #== Coordinate geometry ==
 #TODO: check for redundant functions in this section
@@ -31,160 +104,23 @@ def toRGBarray(array):
     rgb_array = numpy.array([array, array, array])
     rgb_array = numpy.rollaxis(rgb_array, 0, len(array.shape))
     return rgb_array
- 
-def numpy_circle(diameter, center = (0,0), color = 1.0, array_size = (100, 100)):
-    radius_sq = (diameter * 0.5) ** 2
-    circle = numpy.ones(array_size)
-    coords = numpy.nonzero(circle)
-    distance_x = coords[0] - (center[0] + int(0.5 * array_size[0]))
-    distance_y = coords[1] - (center[1] + int(0.5 * array_size[1]))
-    
-    distance_x = distance_x ** 2
-    distance_y = distance_y ** 2
-    distance = distance_x + distance_y
-    active_pixel_mask = numpy.where(distance <= radius_sq, 1, 0)
-    circle = circle * 0
-    for i in range(len(active_pixel_mask)):
-        if active_pixel_mask[i] == 1:
-            circle[coords[0][i], coords[1][i]] = color
-    return circle 
- 
-def numpy_circles(radii,  centers,  array_size,  colors = None):
-    from visexpA.engine.datadisplay.imaged import imshow
-
-    a = numpy.zeros(array_size).astype('uint8')
-    if not isinstance(radii, (list, tuple)) or  (hasattr(radii, 'shape') and radii.shape[1]==1):
-        # either a numpy array of row, col pairs, or a list of numpy arrays with 1 row,col pair is accepted
-        radii = [radii]
-    if colors is None: colors = 255
-    if not isinstance(colors, (tuple, list)) or (len(colors)==1 and len(radii)>1):
-        colors = [colors]*len(radii)
-    
-    from PIL import Image, ImageDraw
-    im=Image.fromarray(a)
-    draw = ImageDraw.Draw(im)
-    im_center = numpy.array(array_size).astype(float)/2
-    for c, r, color in zip(centers, radii, colors):
-        if 0:
-            r_l = numpy.clip(c['row']-r, 0, array_size[0]) # lower limit for row coords
-            r_h = numpy.clip(c['row']+r+1, 0, array_size[0])
-            c_l = numpy.clip(c['col']-r, 0, array_size[1])
-            c_h = numpy.clip(c['col']+r+1, 0, array_size[1]+1)
-            row, col = numpy.ogrid[r_l-c['row']+(r-1)%2: r_h-c['row'], c_l-c['col']+(r-1)%2: c_h-c['col']]
-            index = row**2 + col**2 <= r**2
-            a[r_l:r_h+(r%2),c_l:c_h+(r%2)][index] = color
-        else:
-            bbox =  (c['col']-r,  c['row']-r,c['col']+r, c['row']+r)
-            draw.ellipse(bbox, fill=color)
-    return numpy.array(im)
-
-def arc_vertices(diameter, n_vertices,  angle,  angle_range,  pos = [0, 0]):
-    if not isinstance(diameter,  list):
-        diameter_list = [diameter, diameter]
-    else:
-        diameter_list = diameter   
-    
-    start_angle = (angle - 0.5 * angle_range)  * numpy.pi / 180.0
-    end_angle = (angle + 0.5 * angle_range) * numpy.pi / 180.0
-    angles = numpy.linspace(start_angle, end_angle,  n_vertices)
-#    angles = angles[1:]
-    vertices = numpy.zeros((angles.shape[0],  2))    
-    vertices[:, 0] = 0.5 * numpy.cos(angles)
-    vertices[:, 1] = 0.5 * numpy.sin(angles)
-    return vertices * numpy.array(diameter_list) + numpy.array(pos)
-
-def circle_to_numpy(diameter,  resolution = 1.0,  image_size = (100,  100),  color = 1.0,  pos = (0, 0)):
-    '''
-    diameter: diameter of circle in pixels
-    resolution: angle resolution of drawing circle
-    image_size: x, y size of image/numpy array in pixels
-    color: color of circle, greyscale, range 0...1
-    pos : x, y position in pixels, center is 0, 0
-    '''
-    vertices = calculate_circle_vertices([diameter,  diameter],  resolution)
-    from PIL import Image,  ImageDraw
-    import numpy
-    image = Image.new('L',  image_size,  0)
-    draw = ImageDraw.Draw(image)
-    
-    vertices_int = []
-    for i in vertices:
-        vertices_int.append(int(i[0] + image_size[0] * 0.5) + pos[0])
-        vertices_int.append(int(i[1] + image_size[1] * 0.5) - pos[1])
-    
-    
-    draw.polygon(vertices_int,  fill = int(color * 255.0))    
-    #just for debug
-    image.show()
-    print numpy.asarray(image)
-    return numpy.asarray(image)
-    
-def rectangle_vertices(size, orientation = 0):
-    alpha = numpy.arctan(float(size['row'])/float(size['col']))
-    angles = numpy.array([alpha, numpy.pi - alpha, numpy.pi + alpha, - alpha])
-    angles -= orientation * numpy.pi / 180.0
-    half_diagonal = 0.5 * numpy.sqrt(size['row'] ** 2 + size['col'] ** 2)
-    vertices = []
-    for angle in angles:
-        vertice = [numpy.cos(angle), numpy.sin(angle)]
-        vertices.append(vertice)
-    vertices = numpy.array(vertices)
-    vertices *= half_diagonal
-    return vertices    
-
-def calculate_circle_vertices(diameter,  resolution = 1.0,  start_angle = 0,  end_angle = 360, pos = (0,0),  arc_slice = False):
-    '''
-    Resolution is in steps / degree
-    radius is a list of x and y
-    '''
-    output_list = False
-    if output_list:
-        vertices = []
-    else:
-        n_vertices_arc = (end_angle - start_angle) * resolution + 1
-        if abs(start_angle - end_angle) < 360 and arc_slice:
-            n_vertices = n_vertices_arc + 1
-        else:
-            n_vertices = n_vertices_arc
-        vertices = numpy.zeros(shape = (n_vertices,  2))
-        
-    if output_list:
-        for i in range(int(start_angle * resolution),  int(end_angle * resolution)):
-                    angle = (float(i)*math.pi / 180.0) / resolution
-                    vertice = [0.5 * diameter[0] * math.cos(angle) + pos[0],  0.5 * diameter[1] * math.sin(angle) + pos[1]]
-                    vertices.append(vertice)
-    else:
-        start_angle_rad = start_angle * math.pi / 180.0
-        end_angle_rad = end_angle * math.pi / 180.0
-        angle = numpy.linspace(start_angle_rad,  end_angle_rad, n_vertices_arc)        
-        x = 0.5 * diameter[0] * numpy.cos(angle) + pos[0]
-        y = 0.5 * diameter[1] * numpy.sin(angle) + pos[1]
-        vertices[0:n_vertices_arc, 0] = x
-        vertices[0:n_vertices_arc, 1] = y      
-    
-    if abs(start_angle - end_angle) < 360:
-        if output_list:
-            if arc_slice:
-                vertices.append([0,  0])
-        else:
-            if arc_slice:                
-                vertices[-1] = numpy.array([0,  0])
-    return vertices
 
 def coordinate_system(type, SCREEN_RESOLUTION=None):
     '''looks up proper settings for commonly used coordinate system conventions'''
     if type=='ulcorner':
-        if SCREEN_RESOLUTION is None: raise ValueError('Screen resolution is needed for converting to upper-left corner origo coordinate system.')
+        if SCREEN_RESOLUTION == None: raise ValueError('Screen resolution is needed for converting to upper-left corner origo coordinate system.')
         ORIGO = cr((-0.5 * SCREEN_RESOLUTION['col'], 0.5 * SCREEN_RESOLUTION['row']))
         HORIZONTAL_AXIS_POSITIVE_DIRECTION = 'right'
         VERTICAL_AXIS_POSITIVE_DIRECTION = 'down'
+        UPPER_LEFT_CORNER = rc((0,0))
     elif type=='center':
         ORIGO = cr((0, 0))
         HORIZONTAL_AXIS_POSITIVE_DIRECTION = 'right'
         VERTICAL_AXIS_POSITIVE_DIRECTION = 'up'
+        UPPER_LEFT_CORNER = cr((-0.5 * SCREEN_RESOLUTION['col'], 0.5 * SCREEN_RESOLUTION['row']))
     else:
         raise ValueError('Coordinate system type '+type+' not recognized')
-    return ORIGO, HORIZONTAL_AXIS_POSITIVE_DIRECTION, VERTICAL_AXIS_POSITIVE_DIRECTION
+    return ORIGO, HORIZONTAL_AXIS_POSITIVE_DIRECTION, VERTICAL_AXIS_POSITIVE_DIRECTION, UPPER_LEFT_CORNER
     
 def centered_to_ulcorner_coordinate_system(coordinates, screen_size):
     cooridnates_ulcorner = coordinates
@@ -213,7 +149,7 @@ def um2pixel(data, origin, scale):
     if scale['col'] == 0.0 or scale['row'] == 0.0:
         raise RuntimeError('Scaling is incorrect {0}'.format(scale))
     else:
-        in_pixel = rc((numpy.cast['int']((data['row']-origin['row'])/scale['row']), numpy.cast['int']((data['col']-origin['col'])/scale['col'])))
+        in_pixel = rc(((data['row']-origin['row'])/scale['row'], (data['col']-origin['col'])/scale['col']))
     return in_pixel
     
 def pixel2um(data, origin, scale):
@@ -225,6 +161,14 @@ def argsort(seq):
     #http://stackoverflow.com/questions/3382352/equivalent-of-numpy-argsort-in-basic-python/3382369#3382369
     #by ubuntu
     return sorted(range(len(seq)), key=seq.__getitem__)
+    
+def inrange(val, min, max):
+    if hasattr(val, 'dtype') and ((val >= min).all() and (val <= max).all()):
+        return True
+    elif val >= min and val <= max:
+       return True
+    return False
+        
     
 def nd(rcarray, squeeze=False, dim_order=None,tuples=0):
     '''Convenience function to convert a recarray to nd array'''
@@ -238,10 +182,7 @@ def nd(rcarray, squeeze=False, dim_order=None,tuples=0):
     if squeeze or rcarray.ndim==0:
         res=numpy.squeeze(res)
     if tuples: #gives back list of tuples on which set operations can be performed
-        if rcarray.ndim==0:
-            res = tuple(res)
-        else:
-            res = [tuple(item) for item in res]
+        res = [tuple(item) for item in res]
     return res
 
 def rcd(raw):
@@ -275,8 +216,8 @@ def rcd_pack(raw, dim_order = [0, 1],**kwargs):
     dtype={'names':dim_names,'formats':[raw.dtype]*len(dim_names)}
     if raw.ndim > len(dim_names):
         raise TypeError('Input data dimension must be '+str(len(dim_names))+' Call rc_flatten if you want data to be flattened before conversion')
-    if raw.ndim==2 and raw.shape[0]!=len(dim_names): # required format (2,x)
-        raise RuntimeError('Input array provided to rc should be {0}, got {1}').format(raw.T.shape, raw.shape)
+    if raw.ndim==2 and raw.shape[1]==len(dim_names): # convenience feature: user must not care if input shape is (2,x) or (x,2)  we convert to the required format (2,x)
+        raw=raw.T
     raw= numpy.take(raw, order, axis=0) #rearrange the input data so that the order along dim0 is [row,col,depth]
     return numpy.array(zip(*[raw[index] for index in range(len(dim_order))]),dtype=dtype)
 
@@ -344,13 +285,16 @@ def rc_multiply(operand1, operand2):
 def rc_abs(value):
     return rc((abs(value['row']), abs(value['col'])))
 
-def rc_multiply_with_constant(rc_value, constant):
+def rc_x_const(rc_value, constant):
     if rc_value.shape == ():
             return rc((rc_value['row'] * constant, rc_value['col'] * constant))
     else:
             rows = rc_value[:]['row'] * constant
             cols = rc_value[:]['col'] * constant
             return rc(numpy.array([rows, cols]))
+            
+def rc_multiply_with_constant(rc_value, constant):#Obsolete
+    return rc_x_const(rc_value, constant)
             
 def rc_angle(point1, point2, degree = False):
     '''
@@ -412,7 +356,6 @@ def calculate_trajectory(start_point,  end_point,  spatial_resolution,  curve = 
     '''
     Calculate trajectory coordinates between two points or a point pairs
     '''
-    #TODO: multiple trajectories, trajectory of multiple predefined points    
     distance = rc_distance(start_point,  end_point)
     number_of_steps = int(round(distance / spatial_resolution, 0))
     step_size = distance / number_of_steps    
@@ -422,9 +365,13 @@ def calculate_trajectory(start_point,  end_point,  spatial_resolution,  curve = 
         angle = numpy.arctan2(float(direction['row']), float(direction['col']))
         trajectory = []
         step_vector = cr((numpy.cos(angle) * step_size, numpy.sin(angle) * step_size))
+        trajectory_row = []
+        trajectory_col = []
         for step in range(number_of_steps):
-            trajectory.append(rc_add(start_point, rc_multiply_with_constant(step_vector, step)))
-        trajectory = numpy.array(trajectory)
+            p = rc_add(start_point, rc_x_const(step_vector, step))
+            trajectory_row.append(float(p['row']))
+            trajectory_col.append(float(p['col']))
+        trajectory = rc(numpy.array([trajectory_row,trajectory_col]))
         return trajectory
         
     
@@ -477,17 +424,18 @@ def fetch_classes(basemodule, classname=None,  exclude_classtypes=[],  required_
                     class_list.append((m, attr[1]))
                     # here we also could execute some test on the experiment which lasts very short time but ensures stimulus will run  
         except ImportError:
-            pass
-                
+            print modname
+            import traceback
+            print traceback.format_exc()
     #Filter experiment config list. In test mode, experiment configs are loaded only from automated_test_data. In application run mode
     #this module is omitted
     filtered_class_list = []
+    test_running = introspect.is_test_running()
     for class_item in class_list:
-        if (class_item[0].__name__.find('automated_test_data') != -1 or \
-        class_item[0].__name__.find('presentinator_experiment') != -1 or\
-        class_item[0].__name__.find('default_configs') != -1) and unit_test_runner.TEST_test:
+        #If unit test or batch of unit tests (unittest_aggregator) is run, add fetch all machine configs, otherwise omit automated_test_data module.
+        if test_running:
             filtered_class_list.append(class_item)
-        elif not class_item[0].__name__.find('automated_test_data') != -1 and not unit_test_runner.TEST_test:
+        elif not 'automated_test_data' in class_item[0].__name__:
             filtered_class_list.append(class_item)
     return filtered_class_list
     
@@ -525,8 +473,7 @@ def keep_closest_ancestors(class_list,  required_ancestors):
     all_ancestors_closest = numpy.where(eligible.sum(axis=0) == len(required_ancestors))[0]
     if len(all_ancestors_closest)!=1:
         raise ValueError('There is no class in the list for which all of the required ancestors are closest to the child')
-    else:
-        return class_list[all_ancestors_closest[0]]
+    return class_list[all_ancestors_closest]
     
 def prepare_dynamic_class_instantiation(modules,  class_name):        
     """
@@ -600,8 +547,7 @@ version_paths = {
     'subprocess' : 'standard', 
     'numpy': 'version.version', 
     'scipy': 'version.version', 
-    'Image': 'VERSION', 
-    'ImageDraw': 'Image.VERSION', 
+    'PIL': 'VERSION', 
     'tables': '__version__', 
     'serial': 'VERSION', 
     'parallel': 'VERSION', 
@@ -612,11 +558,29 @@ version_paths = {
     'celery' : '__version__',
     'pp' : 'version',
     'mahotas': 'version.version',
-    'Helpers' : 'version', 
     'visexpman': 'version', 
     'visexpA': 'version', 
     'sklearn':'__version__',
-    'Polygon':'__version__'
+    'Polygon':'__version__',
+    'blosc': '__version__',
+    'zmq': '__version__',
+    'psutil': '__version__',
+    'PIL': 'VERSION',
+    'argparse': '__version__',
+    'optparse': '__version__',
+    'matplotlib': '__version__',
+    'zlib': '__version__',
+    'json': '__version__',
+    'simplejson': '__version__',
+    'struct': 'standard',
+    'warnings': 'standard',
+    'glob': 'standard',
+    'pdb': 'standard',
+    'itertools': 'standard',
+    'functools': 'standard',
+    'platform': 'standard',
+    'getpass': 'standard',
+    'blosc': 'TBD',
     }    
     
 def imported_modules():
@@ -669,10 +633,13 @@ def module_versions(modules):
                 try:
                     version_path = version_paths[module].split('.')
                     version = getattr(sys.modules[module], version_path[0])
-                    if not isinstance(version, str):                        
-                        version = getattr(version, version_path[1])                        
+                    if not isinstance(version, str) and not isinstance(version, unicode):
+                        if callable(getattr(version, version_path[1])):
+                            version = getattr(version, version_path[1])()
+                        else:
+                            version = getattr(version, version_path[1])
                 except AttributeError:
-                    version = ''                
+                    version = 'unknown'
                 module_version += '%s %s\n'%(module, version.replace('\n', ' '))
                 module_version_dict[module] = version
             else:
@@ -713,12 +680,30 @@ def list_stdlib():
     return lib_members
 
 #object <-> numpy array
+def object2str(obj):
+    if ENABLE_COMPRESSION:
+        return compressor.compress(pickle.dumps(obj, 2),6)
+    else:
+        return pickle.dumps(obj, 2)
+
+def str2object(string):
+    if ENABLE_COMPRESSION:
+        return pickle.loads(compressor.decompress(string))
+    else:
+        return pickle.loads(string)
+
 def array2object(numpy_array):
-    return pickle.loads(numpy_array.tostring())
+    if ENABLE_COMPRESSION:
+        return pickle.loads(compressor.decompress(numpy_array.tostring()))
+    else:
+        try:
+            return pickle.loads(numpy_array.tostring())
+        except:
+            return pickle.loads(compressor.decompress(numpy_array.tostring()))
     
 def object2array(obj):
-    return numpy.fromstring(pickle.dumps(obj), numpy.uint8)
-    
+    return numpy.fromstring(object2str(obj), numpy.uint8)
+        
 def object2hdf5(h, vn):
     if hasattr(h, vn):
         setattr(h, vn, object2array(getattr(h, vn)))
@@ -731,8 +716,6 @@ def hdf52object(h, vn, default_value = None):
         return copy.deepcopy(array2object(getattr(h, vn)))
     else:
         return default_value
-    
-
 
 #== Experiment specific ==
 def um_to_normalized_display(value, config):
@@ -748,7 +731,7 @@ def um_to_normalized_display(value, config):
 def retina2screen(widths, speed=None, machine_config=None, option=None):
     '''converts microns on retina to cycles per pixel on screen
     '''
-    if machine_config.IMAGE_PROJECTED_ON_RETINA == 0:
+    if machine_config.IMAGE_DIRECTLY_PROJECTED_ON_RETINA == 0:
         visualangles = um2degrees(widths) # 300um is 10 degrees
         #widthsonmonitor = tan(2*pi/360*visualangles)*monitor.distancefrom_mouseeye/monitor.pixelwidth #in pixels
         widthsonmonitor = numpy.pi/180*visualangles*machine_config.SCREEN_DISTANCE_FROM_MOUSE_EYE/machine_config.SCREEN_PIXEL_WIDTH #in pixels
@@ -767,7 +750,7 @@ def retina2screen(widths, speed=None, machine_config=None, option=None):
                 cyclespersecond[i] = speedonmonitor[i]/(widthsonmonitor[i]*2) # divide by period, i.e. width*2
                 time4onecycle_onscreen[i] = (machine_config.SCREEN_RESOLUTION['col']/onecycle_pix[i])/cyclespersecond[i]
             return cyclesperpixel, time4onecycle_onscreen
-    elif machine_config.IMAGE_PROJECTED_ON_RETINA==1:
+    elif machine_config.IMAGE_DIRECTLY_PROJECTED_ON_RETINA==1:
         widthsonmonitor = widths/machine_config.SCREEN_UM_TO_PIXEL_SCALE
         no_periods_onscreen = machine_config.SCREEN_RESOLUTION['col']/(widthsonmonitor*2)
         if speed is None:
@@ -789,9 +772,9 @@ def um2degrees(umonretina):
     return 10.0*numpy.array(umonretina, numpy.float)/300
     
 #== Time /Date ==
-def datetime_string():
+def datetime_string(separator = '-', datetime_separator='_'):
     now = time.localtime()
-    return ('%4i-%2i-%2i_%2i-%2i-%2i'%(now.tm_year,  now.tm_mon, now.tm_mday, now.tm_hour, now.tm_min, now.tm_sec)).replace(' ', '0')
+    return ('{1:0=4}{0}{2:0=2}{0}{3:0=2}{7}{4:0=2}{0}{5:0=2}{0}{6:0=2}'.format(separator, now.tm_year,  now.tm_mon, now.tm_mday, now.tm_hour, now.tm_min, now.tm_sec, datetime_separator))
 
 def date_string():
     now = time.localtime()
@@ -802,31 +785,43 @@ def truncate_timestamps(list_of_timestamps,  at_position):
     with least significant data truncated. E.g. to get timestamps that contain only
    year_month_date but no hour, second, millisecond: set at_position=3
    '''
-    timetuples = numpy.array([time.localtime(float(ts)) for ts in list_of_timestamps])
+    timetuples = numpy.array([time.localtime(ts) for ts in list_of_timestamps])
     truncated_timestamps= [time.mktime(tt[:at_position].tolist()+[0]*(9-at_position)) for tt in timetuples] #timestamps made from timetuples where only year month day differs, rest is 0
     return truncated_timestamps
 
 def timestamp2hms(timestamp):
     time_struct = time.localtime(timestamp)
-    return ('%2i:%2i:%2.3f'%(time_struct.tm_hour, time_struct.tm_min, time_struct.tm_sec + numpy.modf(timestamp)[0])).replace(' ', '0')
+    return ('{0:0=2}:{1:0=2}:{2:0=2.1f}'.format(time_struct.tm_hour, time_struct.tm_min, time_struct.tm_sec + numpy.modf(timestamp)[0]))
     
-def time_stamp_to_hm(timestamp):
+def timestamp2hm(timestamp):
     time_struct = time.localtime(timestamp)
-    return ('%2i:%2i'%(time_struct.tm_hour, time_struct.tm_min)).replace(' ', '0')
+    return ('{0:0=2}:{1:0=2}'.format(time_struct.tm_hour, time_struct.tm_min))
     
-def timestamp2ymdhms(timestamp):
+def timestamp2ymdhms(timestamp,filename=False):
     time_struct = time.localtime(timestamp)
-    return '{0}-{1}-{2}+{3:2}:{4:2}:{5:2}'.format(time_struct.tm_year, time_struct.tm_mon, time_struct.tm_mday, time_struct.tm_hour, time_struct.tm_min, time_struct.tm_sec).replace(' ','0').replace('+',' ')
+    if filename:
+        dt='_'
+        t='-'
+    else:
+        dt=' '
+        t=':'
+    return '{0:0=4}-{1:0=2}-{2:0=2}{6}{3:0=2}{7}{4:0=2}{7}{5:0=2}'.format(time_struct.tm_year, time_struct.tm_mon, time_struct.tm_mday, time_struct.tm_hour, time_struct.tm_min, time_struct.tm_sec,dt,t)
 
 def timestamp2ymdhm(timestamp):
     time_struct = time.localtime(timestamp)
-    return '{0}-{1}-{2}+{3:2}:{4:2}'.format(time_struct.tm_year, time_struct.tm_mon, time_struct.tm_mday, time_struct.tm_hour, time_struct.tm_min).replace(' ','0').replace('+',' ')
+    return '{0:0=4}-{1:0=2}-{2:0=2}+{3:0=2}:{4:0=2}'.format(time_struct.tm_year, time_struct.tm_mon, time_struct.tm_mday, time_struct.tm_hour, time_struct.tm_min).replace('+',' ')
 
 def timestamp2ymd(timestamp,separator='-'):
     time_struct = time.localtime(timestamp)
     return '{0:0=4}{3}{1:0=2}{3}{2:0=2}'.format(time_struct.tm_year, time_struct.tm_mon, time_struct.tm_mday,separator).replace('+',' ')
-
-
+    
+def datestring2timestamp(ds,format="%d/%m/%Y"):
+    return time.mktime(datetime.datetime.strptime(ds, format).timetuple())
+    
+def timestamp2secondsofday(timestamp):
+    time_struct = time.localtime(timestamp)
+    return time_struct.tm_hour*3600+time_struct.tm_min*60+time_struct.tm_sec
+    
 class Timeout(object):
     def __init__(self, timeout, sleep_period = 0.01):
         self.start_time = time.time()
@@ -842,7 +837,7 @@ class Timeout(object):
             
     def wait_timeout(self, break_wait_function = None, *args):
         '''
-        break_wait_function: shall not block and shall return with a boolean fielld
+        break_wait_function: shall not block and shall return with boolean
         Returns True if expected condition is True
         '''        
         result = False
@@ -857,7 +852,7 @@ class Timeout(object):
             time.sleep(self.sleep_period)
         return result
         
-def periodic_caller(period, call, args = None, idle_time = 0.1):
+def periodic_caller(period, call, args = None, idle_time = 0.1):#OBSOLETE, not used by anyone
     last_run = time.time()
     while True:
         now = time.time()
@@ -925,7 +920,6 @@ def interpolate_waveform(waveform, ratio):
     else:
         shape = ratio * waveform.shape[0]
     waveform_interpolated = waveform_interpolated.reshape(shape)
-        
     return waveform_interpolated
     
 def resample_waveform(waveform, ratio):
@@ -936,14 +930,13 @@ def resample_waveform(waveform, ratio):
         for channel in range(waveform.shape[1]):
             resampled_waveform.append(waveform[:,channel][::ratio])
         resampled_waveform = numpy.array(resampled_waveform).transpose()
-            
     return resampled_waveform
     
 def generate_pulse_train(offsets, pulse_widths, amplitudes, duration, sample_rate = None):
     '''
     offsets: pulse offsets in samples, always must be a list of a numpy array
     pulse_widths: width of pulses in samples, if single number is provided, all the pulses will have the same size
-    amplitudes: amplitude of each pulse. If a float or and int is provied, it is aasumed that all the pulses must have the same amplitude
+    amplitudes: amplitude of each pulse. If a float or and int is provied, it is assumed that all the pulses must have the same amplitude
     duration: duration of the whole pulse train in samples
     
     If sample_rate is not none, the offsets, the pulse_widths and the duration parameters are handled in time units
@@ -983,10 +976,9 @@ def generate_pulse_train(offsets, pulse_widths, amplitudes, duration, sample_rat
         if offset + _pulse_widths[pulse_index] > _duration or offset + 1 > _duration:
             raise RuntimeError('Last pulse falls outside the waveform')        
         waveform[offset: offset + _pulse_widths[pulse_index]] = pulse
-        
     return waveform
 
-def generate_waveform(waveform_type,  n_sample,  period,  amplitude,  offset = 0,  phase = 0,  duty_cycle = 0.5):
+def generate_waveform(waveform_type,  n_sample, period, amplitude,  offset = 0,  phase = 0,  duty_cycle = 0.5):
     wave = []
     period = int(period)
     for i in range(int(n_sample)):
@@ -1037,14 +1029,14 @@ def chunks(l, n):
 def file_to_binary_array(path):
     if os.path.exists(path):
         return numpy.fromfile(str(path), dtype = numpy.uint8)        
-    #else:
-     #   return numpy.zeros(2)
+    else:
+        return numpy.zeros(2)
     
-def in_range(number,  range1,  range2, preceision = None):
-    if preceision != None:
-        number_rounded = round(number, preceision)
-        range1_rounded = round(range1, preceision)
-        range2_rounded = round(range2, preceision)
+def in_range(number,  range1,  range2, precision = None):
+    if precision != None:
+        number_rounded = round(number, precision)
+        range1_rounded = round(range1, precision)
+        range2_rounded = round(range2, precision)
     else:
         number_rounded = number
         range1_rounded = range1
@@ -1074,12 +1066,6 @@ def is_in_list(list, item_to_find):
     else:
         return False
         
-def is_substring_in_list(list, substring):
-    result = [item for item in list if substring in item]
-    if len(result) > 0:
-        return True
-    else:
-        return False
 def string_to_array(string):
     array = []
     for byte in list(string):
@@ -1112,21 +1098,84 @@ def safe_has_key(var, key):
         if var.has_key(key):
             result = True
     return result
-
+    
+def safe_istrue(obj, var):
+    return (hasattr(obj, var) and getattr(obj, var))
+    
+def get_key(var, key):
+    '''
+    Returns None when var does not have specified key or var is not a dict at all
+    '''
+    if safe_has_key(var, key):
+        return var[key]
+    else:
+        return None
+        
+def sort_dict(list_of_dict, key):
+    '''
+    Sorts a list of dictionaries by values in key. Values in key shall be unique
+    '''
+    sortable_values = [item[key] for item in list_of_dict]
+    sortable_values.sort()
+    sorted_list = []
+    for val in sortable_values:
+        for item in list_of_dict:
+            if item[key] == val:
+                if item in sorted_list:
+                    continue
+                sorted_list.append(item)
+                break
+    return sorted_list
+    
+    
+def item2list(item):
+    '''
+    Checks if item is a list or not. If not, makes a 1 item list of it
+    '''
+    if hasattr(item, '__iter__'):
+        item_list = item
+    else:
+        item_list = [item]
+    return item_list
+    
+def check_expected_parameter(config, parameter_name):
+    for pn in item2list(parameter_name):
+        if not hasattr(config, pn):
+            raise RuntimeError('{0} parameter must be defined'.format(pn))
+    
+def printl(self, message, loglevel='info', stdio = True):
+    '''
+    Message to logfile, queued socket and standard output
+    '''
+    message_string = str(message)
+    self.send(message_string)
+    if stdio:
+        sys.stdout.write(message_string+'\n')
+    if hasattr(self.log, loglevel):
+        getattr(self.log, loglevel)(message_string, self.machine_config.user_interface_name)
+        
+def list_swap(l, i1, i2):
+    l[i1], l[i2] = l[i2], l[i1]
+    return l
+    
 def sendmail(to, subject, txt):
-    import subprocess,file
-    message = """\
-    Subject: %s
-
-    %s
-    """ % (subject, txt)
+    import subprocess,fileop
+    message = 'Subject:{0}\n\n{1}\n'.format(subject, txt)
     fn='/tmp/email.txt'
-    file.write_text_file(fn,message)
+    fileop.write_text_file(fn,message)
     # Send the mail
-    cmd='sendmail {0} < {1}'.format(to,fn)
+    cmd='/usr/sbin/sendmail {0} < {1}'.format(to,fn)
     res=subprocess.call(cmd,shell=True)
     os.remove(fn)
     return res==0
+    
+def push2git(server, user, password, repository_path, message,branchname):
+    '''
+    automatically pushes changes in repository
+    '''
+    import subprocess
+    subprocess.call('cd {0};git add .;git commit -m "{1}";git push origin {2}'.format(repository_path, message, branchname), shell=True)
+    
 
 class TestUtils(unittest.TestCase):
     def setUp(self):
@@ -1214,29 +1263,40 @@ class TestUtils(unittest.TestCase):
         data = (1, 2)
         rc_value = rc(data)
         self.assertEqual((rc_value['row'], rc_value['col']), data)
-         
-    def test_19_sendmail(self):
-            self.assertTrue(sendmail('zoltan.raics@fmi.ch','test','c'))
             
-    def test_numpy_circles(self):
-        pars = [ [[10, 25], (rc((1, 1)), rc((25, 25))), (64, 64), 255],  #
-                        [[10, 25],  (rc((64-1, 64-1)), rc((64-25, 64-25))), (64, 64), 255],   # odd radius, single center
-                        ]
-        for p in pars:
-            img = numpy_circles(p[0], p[1], p[2], p[3])
-            pass
+    def test_17_object2array(self):
+        objects = [
+                   [1,2,3,'a'],
+                   {'d':range(10000000)},
+                   ]
+        res = []
+        for o in objects:
+            res.append(array2object(object2array(o)))
+        self.assertEqual(objects, res)
+        
+    def test_18_shuffle_positions(self):
+        from visexpman.users.test import unittest_aggregator
+        positions=array2object(numpy.load(os.path.join(unittest_aggregator.prepare_test_data('shuffle_positions'),'positions.npy')))
+        col=[1.0,0.0]
+        import itertools
+        pc=[[c,p] for p,c in itertools.product(positions,col)]
+        shuffle_positions_avoid_adjacent(pc,rc((150,150)))
+
+    def test_19_sendmail(self):
+        self.assertTrue(sendmail('zoltan.raics@fmi.ch','test','c'))
+        
+    def test_20_push(self):
+        import fileop
+        push2git('rlvivo1.fmi.ch', 'rz', 'ATxmega16A4', '/tmp/visexpman', 'commit msg', 'test')
+        
 def shuffle_positions_avoid_adjacent(positions,shape_distance):
     remaining=copy.deepcopy(positions)
     success=True
     shuffled=[]
-    cti=0
     while True:
-        cti+=1
         selected_i = random.choice(range(len(remaining)))
         if len(shuffled)>0:
-            ct=0
             while True:
-                ct+=1
                 coords=rc(numpy.array([nd(shuffled[-1][1]),nd(remaining[selected_i][1])]))
                 if abs(numpy.diff(coords['row'])[0])<=shape_distance['row'] and abs(numpy.diff(coords['col'])[0])<=shape_distance['col']:
                     if len(remaining)>1:
@@ -1246,19 +1306,21 @@ def shuffle_positions_avoid_adjacent(positions,shape_distance):
                         break
                 else:
                     break
-                if ct>len(positions)*2:
-                    success=False
-                    break
-        if cti>len(positions)*2:
-            success=False
-            break
         shuffled.append(remaining[selected_i])
         del remaining[selected_i]
         if len(remaining)==0:
             break
     return shuffled,success
+    
+def send_udp(ip,port,msg):
+    import socket
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.sendto(msg, (ip, port))
             
 if __name__ == "__main__":
+    module_names, visexpman_module_paths = imported_modules()
+    module_versions, module_version = module_versions(module_names)
+    pass
     #commented out by Daniel:
     #start_point = cr((0.0, 0.0))
     #end_point = cr((10.0, 10.0))
@@ -1289,7 +1351,7 @@ if __name__ == "__main__":
 #                            'Comments':['^M\d+(\S+)\(',str],
 #                            'Anesthesia':['ND\d\d*\ (\S+\ *\S*)\ \S+\)$',str],
 #                                          }
-#            stimpar = file.parsefilename(filename, commonpars)
+#            stimpar = fileop.parsefilename(filename, commonpars)
 #            result = {'AnimalStrain':['Bl6'], # Match M???(... at the beginning of the line
 #                            'AnimalBirthDay_YMD':[4, 9, 10],
 #                            'Injected_YMD':[1, 11, 10],
@@ -1321,7 +1383,6 @@ if __name__ == "__main__":
 
             
     mytest = unittest.TestSuite()
-    mytest.addTest(TestUtils('test_numpy_circles'))
     mytest.addTest(TestUtils('test_01_pulse_train'))
     mytest.addTest(TestUtils('test_02_pulse_train'))
     mytest.addTest(TestUtils('test_03_pulse_train'))
@@ -1333,7 +1394,9 @@ if __name__ == "__main__":
     mytest.addTest(TestUtils('test_13_rcd_pack'))
     mytest.addTest(TestUtils('test_14_rcd_pack'))
     mytest.addTest(TestUtils('test_15_rcd_pack'))
+    mytest.addTest(TestUtils('test_18_shuffle_positions'))
     mytest.addTest(TestUtils('test_19_sendmail'))
+    mytest.addTest(TestUtils('test_20_push'))
     alltests = unittest.TestSuite([mytest])
     #suite = unittest.TestLoader().loadTestsFromTestCase(Test)
     unittest.TextTestRunner(verbosity=2).run(alltests)

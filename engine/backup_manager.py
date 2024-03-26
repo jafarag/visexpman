@@ -1,220 +1,242 @@
-import os,shutil,time,logging,datetime,filecmp,subprocess,threading,Queue
-import traceback
-transient_backup_path='/mnt/databig/backup'
-tape_path='/mnt/tape/hillier/invivocortex/TwoPhoton/new'
-mdrive='/mnt/mdrive/invivo/rc/raw'
-logfile_path='/mnt/datafast/log/backup_manager.txt'
-rei_data='/mnt/databig/debug/cacone'
-rei_data_tape=os.path.join(tape_path,'retina')
-last_file_access_timout=300
+import os,shutil,time,logging,datetime,filecmp,subprocess,Queue,threading,traceback,sys
+import unittest
 
-transient_processed_files='/mnt/databig/processed'
-mdrive_processed='/mnt/mdrive/invivo/rc/processed'
+class Config(object):
+    last_file_access_timeout=60
+    last_run_timeout=60*60*3
+    watchdog_timeout=120
 
-
-tape_file='/mnt/tape/hillier'
-mdrive_file='/mnt/mdrive/invivo'
-ISMOUNT_ENABLED=True
+class TestConfig(Config):
+    def __init__(self):
+        self.LOGPATH='/tmp/backup_test.txt'
+        self.last_run_timeout=5
+        self.last_file_access_timeout=5
+        self.COPY= [
+                {'src':'/tmp/1', 'dst':['/tmp/a'],'extensions':['.txt'], 'move':True},
+                {'src':'/tmp/2', 'dst':['/tmp/b', '/tmp/c'],'extensions':['.mat', '.hdf5'],'move':False}
+            ]
+            
+class ReiSetup(Config):
+    def __init__(self):
+        self.LOGPATH='q:\\log\\backup_manager.txt'
+        self.COPY= [
+                {'src':'q:\\raw', 'dst':['/tmp/a'],'extensions':['.tif','.csv', '.txt','.mat'], 'move':True},
+                {'src':'q:\\processed', 'dst':['m:\\invitro\\processed'],'extensions':['.hdf5', '.mat'], 'move':True},
+            ]
+            
+class AOSetup(Config):
+    last_run_timeout=60*10
+    def __init__(self):
+        self.LOGPATH='/mnt/datafast/log_ao/backup_manager.txt'
+        self.COPY= [
+                {'src':'/mnt/databig/ao/raw', 'dst':['/mnt/mdrive/invivo/ao/raw'],'extensions':['.mat','.hdf5'], 'move':True},
+                {'src':'/mnt/databig/ao/processed', 'dst':['/mnt/mdrive/invivo/ao/processed'],'extensions':['.mat','.hdf5'], 'move':True},
+            ]
+            
+class RCSetup(Config):
+    def __init__(self):
+        self.LOGPATH='/mnt/datafast/log/backup_manager.txt'
+        self.COPY= [
+                #Backup
+                #Move hdf5/mat files from databig to tape
+                {'src':'/mnt/databig/backup/daniel', 'dst':['/mnt/tape/hillier/invivocortex/TwoPhoton/new/daniel'],'extensions':['.mat','.hdf5'], 'move':True},
+                {'src':'/mnt/databig/backup/animals', 'dst':['/mnt/tape/hillier/invivocortex/TwoPhoton/new/animals'],'extensions':['.hdf5'], 'move':True},
+                #Processed
+                {'src':'/mnt/databig/processed/fiona', 'dst':['/mnt/mdrive/invivo/rc/processed/fiona'],'extensions':['.mat','.png'], 'move':True},
+                {'src':'/mnt/databig/processed/fiona', 'dst':['/mnt/mdrive/invivo/rc/processed/fiona'],'extensions':['.hdf5'], 'filter': 'mouse', 'move':True},
+            ]
+        fullbackup_users=['zoltan', 'fiona','stuart','adrian']
+        for name in fullbackup_users:
+            #Move hdf5 and mat files to tape and m drive
+            self.COPY.append({'src':'/mnt/databig/backup/{0}'.format(name), 'dst':['/mnt/tape/hillier/invivocortex/TwoPhoton/new/{0}'.format(name), '/mnt/mdrive/invivo/rc/raw/{0}'.format(name)],'extensions':['.mat','.hdf5'], 'move':True})
+        fullprocessed_users=['zoltan', 'stuart','adrian']
+        for name in fullprocessed_users:
+            #Move hdf5 and mat files to m drive
+            self.COPY.append({'src':'/mnt/databig/processed/{0}'.format(name), 'dst':['/mnt/mdrive/invivo/rc/processed/{0}'.format(name)],'extensions':['.mat','.hdf5', '.png'], 'move':True})
 
 def watchdog(maxtime,queue):
-    logging.info('Watchdog started')
-#    maxtime,queue=args
+    logging.info('watchdog starts')
     t0=time.time()
     while True:
         if time.time()-t0>maxtime:
             logging.error('Self terminating')
-            logging.error('done')
             subprocess.call('kill -KILL {0}'.format(os.getpid()),shell=True)
         if not queue.empty():
             break
-        time.sleep(30)
+        time.sleep(1)
 
-def is_id_on_drive(id, drive):
-    return len([f for f in list_all_files(drive) if str(id) in os.path.basename(f) and os.path.getsize(f)>0])==2
-
-def check_backup(id):
-    #Check tape first
-    status=''
-    if is_id_on_drive(id, tape_path):
-        status='tape'
-    if is_id_on_drive(id, mdrive):
-        status+=' m drive'
-    if is_id_on_drive(id, transient_backup_path):
-        status +=' databig'
-    if status=='':
-        status='not found'
-    return status
-
-def sendmail(to, subject, txt):
-    message = 'Subject:{0}\n\n{1}\n'.format(subject, txt)
-    logging.info('Sending mail')
-    fn='/tmp/email.txt'
-    fp=open(fn,'w')
-    fp.write(message)
-    fp.close()
-    # Send the mail
-    cmd='/usr/sbin/sendmail {0} < {1}'.format(to,fn)
-    res=subprocess.call(cmd,shell=True)
-    logging.info(str(res))
-    os.remove(fn)
-    return res==0
-
-def is_mounted():
-    if ISMOUNT_ENABLED:
-        if not os.path.ismount('/mnt/tape'):
+class BackupManager(object):
+    '''
+    1) locking mechanism
+    2) copy config
+    
+    '''
+    def __init__(self, config, simple=False):
+        '''
+        Simple mode: no watchdog checking, no new logfile
+        '''
+        self.config=config
+        if not simple:
+            if self.islocked(): return
+            logging.basicConfig(filename= self.config.LOGPATH,
+                        format='%(asctime)s %(levelname)s\t%(message)s',
+                        level=logging.DEBUG)
+            logging.info('Started')
+            if self.check_dest_folders(): return
+            logging.info('Dest folders OK')
+    
+    def islocked(self):
+        return os.path.exists(self.config.LOGPATH) and time.time()-os.path.getmtime(self.config.LOGPATH)<self.config.last_run_timeout
+        
+    def check_dest_folders(self):
+        result=True
+        q=Queue.Queue()
+        wd=threading.Thread(target=watchdog,args=(self.config.watchdog_timeout,q))
+        wd.start()
+        for folders in  [f['dst'] for f in self.config.COPY]:
+            for folder in folders:
+                if not os.path.exists(folder):
+                    self.error('{0} is not available'.format(folder))
+                    result=False
+        q.put('terminate')
+        wd.join()
+        return result
+            
+    def list_all_files(self, path):
+        all_files = []
+        for root, dirs, files in os.walk(path):            
+                all_files.extend([root + os.sep + file for file in files])
+        return all_files
+    
+    def is_file_closed(self,f,timeout):
+        now=time.time()
+        return now-os.path.getmtime(f)>timeout
+                 
+    def sendmail(self, to, subject, txt):
+        if os.name=='posix':
+            message = 'Subject:{0}\n\n{1}\n'.format(subject, txt)
+            logging.info('Sending mail')
+            fn='/tmp/email.txt'
+            fp=open(fn,'w')
+            fp.write(message)
+            fp.close()
+            # Send the mail
+            cmd='/usr/sbin/sendmail {0} < {1}'.format(to,fn)
+            res=subprocess.call(cmd,shell=True)
+            logging.info(str(res))
+            os.remove(fn)
+            return res==0
+            
+    def error(self,msg):
+        logging.error(msg)
+        self.sendmail('zoltan.raics@fmi.ch','backup manager error', msg)
+        
+    def check_mounts(self):
+        q=Queue.Queue()
+        wd=threading.Thread(target=watchdog,args=(2*60,q))
+        wd.start()
+        logging.info('Check network drives')
+        if not is_mounted():
+            self.error('Tape or m mdrive not mounted: m: {0}, tape: {1}'.format(os.path.ismount('/mnt/tape'), os.path.ismount('/mnt/mdrive')))
+            return
+        q.put('terminate')
+        wd.join()
+        
+    def copy(self,copy):
+        files=self.list_all_files(copy['src'])
+        files=[f for f in files if os.path.splitext(f)[1] in copy['extensions']]#Filter expected extensions
+        if copy.has_key('filter'):
+            files=[f for f in files if copy['filter'] in os.path.basename(f)]
+        files.sort()
+        timeout = copy.get('timeout',self.config.last_file_access_timeout)
+        for f in files:
             try:
-                subprocess.call(u'mount /mnt/tape',shell=True)
-                subprocess.call(u'fusermount -u /mnt/tape',shell=True)
+                if not self.is_file_closed(f, timeout):
+                    return
+                #generate dst filenames
+                dst_files = [f.replace(copy['src'], dst) for dst in copy['dst']]
+                [os.makedirs(os.path.dirname(dstf)) for dstf in dst_files if not os.path.exists(os.path.dirname(dstf))]
+                #compare files
+                if not all([os.path.exists(dst_file) and filecmp.cmp(f,dst_file) for dst_file in dst_files]):
+                    for dst_file in dst_files:
+                        shutil.copyfile(f,dst_file) 
+                        logging.info('Copied {0} to {1} ({2})'.format(f, dst_file, os.path.getsize(dst_file)))
+                else:
+                    if copy.get('move',False):
+                        os.remove(f)
+                        logging.info('Deleted {0}'.format(f))
             except:
-                pass
-        return os.path.ismount('/mnt/tape') and os.path.ismount('/mnt/mdrive')
-    else:
-        return os.path.exists(tape_file) and os.path.exists(mdrive_file)
+                self.error(traceback.format_exc())
+        
+    def run(self):
+        for copy in self.config.COPY:
+            self.copy(copy)
+        logging.info('Done')
+        
+class TestStimulationPatterns(unittest.TestCase):
+    def setUp(self):
+        self.config=TestConfig()
+        for f in self.config.COPY:
+            for folder in f['dst']:
+                if os.path.exists(folder):
+                    shutil.rmtree(folder)
+                os.mkdir(folder)
+    
+    def test_01_bulocking(self):
+        if os.path.exists(self.config.LOGPATH):
+            os.remove(self.config.LOGPATH)
+        BackupManager(self.config)
+        BackupManager(self.config)
+        time.sleep(5)
+        BackupManager(self.config)
+        f=open(self.config.LOGPATH,'rt')
+        txt=f.read()
+        f.close()
+        self.assertEqual(txt.count('Started'),2)
+        
+    def test_02_copy(self):
+        #Generate test files
+        extensions=[]
+        for e in self.config.COPY:
+            extensions.extend(e['extensions'])
+        nfiles=10
+        for c in self.config.COPY:
+            if os.path.exists(c['src']):
+                shutil.rmtree(c['src'])
+            os.makedirs(c['src'])
+            for e in extensions:
+                for i in range(nfiles):
+                    f=open(os.path.join(c['src'],'{0}{1}'.format(i,e)),'wb')
+                    f.write('x'*100)
+                    f.close()
+        BackupManager(self.config).run()
+        files=[]
+        for f in self.config.COPY:
+            for folder in f['dst']:
+                files.extend(os.listdir(folder))
+        self.assertEqual(len(files),0)#Brand new files none of them should be copied
+        time.sleep(5)
+        bum=BackupManager(self.config)
+        bum.run()
+        bum.run()
+        for c in self.config.COPY:
+            #check src:
+            src_exts=[os.path.splitext(f)[1] for f in os.listdir(c['src'])]
+            extensions_in_src=[0 for e in src_exts if e in c['extensions']]
+            if c['move']:
+                self.assertEqual(len(extensions_in_src),0)
+            else:
+                self.assertGreater(len(extensions_in_src), 0)
+            for folder in c['dst']:
+                dst_exts=[os.path.splitext(f)[1] for f in os.listdir(folder)]
+                extensions_in_dst=[0 for e in dst_exts if e in c['extensions']]
+                self.assertEqual(len(dst_exts),len(extensions_in_dst))
+        
             
     
-def list_all_files(path):
-    all_files = []
-    for root, dirs, files in os.walk(path):            
-            all_files.extend([root + os.sep + file for file in files])
-    return all_files
-    
-def is_file_closed(f):
-    now=time.time()
-    return now-os.path.getmtime(f)>last_file_access_timout# and now-os.path.getctime(f)>last_file_access_timout#ctime is the change of metadata
-    
-def copy_file(f):
-    try:
-        if f=='/mnt/databig/backup/fiona/20160414/F02514/fragment_xy_region2_30_-129_-8841.18_ReceptiveFieldExploreNewAngleFine_1460651588_0.hdf5': return
-        copy2m= os.path.basename(os.path.dirname(os.path.dirname(os.path.dirname(f))))!='daniel'#Daniel's fiels are not copied to m drive only to tape
-        path=f.replace(transient_backup_path+'/','')
-        target_path_tape=os.path.join(tape_path,path)
-        target_path_m=os.path.join(mdrive,path)
-        if os.path.exists(target_path_tape) and filecmp.cmp(f,target_path_tape) and (not copy2m or (os.path.exists(target_path_m) and filecmp.cmp(f,target_path_m))):#Already backed up
-            os.remove(f)
-            logging.info('Deleted {0}'.format(f))
-            return
-        folders=[target_path_tape]
-        if copy2m:
-            folders.append(target_path_m)
-        for p in folders:
-            if not os.path.exists(os.path.dirname(p)):
-                os.makedirs(os.path.dirname(p))
-        if not is_file_closed(f):
-            return
-        if not os.path.exists(target_path_tape) or 'mouse' in os.path.basename(target_path_tape) or 'animal' in os.path.dirname(f):
-            try:
-                shutil.copy2(f,target_path_tape)
-            except:
-                time.sleep(10)
-                success = False
-                nretry=20
-                for i in range(nretry):
-                    try:
-                        shutil.copy2(f,target_path_tape)
-                        success = True
-                    except:
-                        if i ==nretry-1:
-                            msg=f+'' + str(i)+'\r\n'+traceback.format_exc()
-                            raise RuntimeError(msg)
-                        else:
-                            time.sleep(10)
-                    if success:
-                        break
-            logging.info('Copied to tape: {0}, {1}'.format(f, os.path.getsize(target_path_tape)))
-        if copy2m and (not os.path.exists(target_path_m) or 'mouse' in os.path.basename(target_path_m)):#Mouse file may be updated with scan regions
-            shutil.copyfile(f,target_path_m)
-            logging.info('Copied to m: {0}, {1}'.format(f, os.path.getsize(target_path_m)))
-    except:
-        msg=f+'\r\n'+traceback.format_exc()
-        logging.error(msg)
-        sendmail('zoltan.raics@fmi.ch', 'backup manager raw cortical file copy error', msg)
-        
-def copy_processed_file(f):
-    try:
-        path=f.replace(transient_processed_files+'/','')
-        target_path_m=os.path.join(mdrive_processed,path)
-        if os.path.exists(target_path_m) and filecmp.cmp(f,target_path_m):#Already copied up
-            os.remove(f)
-            logging.info('Deleted {0}'.format(f))
-            return
-        if not os.path.exists(os.path.dirname(target_path_m)):
-            os.makedirs(os.path.dirname(target_path_m))
-        if not is_file_closed(f):
-            return
-        if not os.path.exists(target_path_m) or 'mouse' in os.path.basename(target_path_m):
-            shutil.copyfile(f,target_path_m)
-            logging.info('Copied to m: {0}, {1}'.format(f, os.path.getsize(target_path_m)))
-    except:
-        import traceback
-        msg=traceback.format_exc()
-        logging.error(msg)
-        sendmail('zoltan.raics@fmi.ch', 'backup manager processed cortical file copy error', msg)
-        
-def rei_backup():
-    try:
-        files=list_all_files(rei_data)
-        phys_files=[f for f in files if '.phys'==f[-5:]]
-        coord_files=[f for f in files if 'coords.txt'==os.path.basename(f)]
-        rawdata_files=[f for f in files if '.csv'==f[-4:] and 'timestamp' not in os.path.basename(f)]
-        backupable_files = phys_files
-        backupable_files.extend(coord_files)
-        backupable_files.extend(rawdata_files)
-        for f in backupable_files:
-            target_fn=f.replace(rei_data,rei_data_tape)
-            if not os.path.exists(os.path.dirname(target_fn)):
-                os.makedirs(os.path.dirname(target_fn))
-            if is_file_closed(f) and not os.path.exists(target_fn):
-                shutil.copy2(f,target_fn)
-                logging.info('Copied {0}'.format(f))
-    except:
-        import traceback
-        msg=traceback.format_exc()
-        logging.error(msg)
-        sendmail('zoltan.raics@fmi.ch', 'backup manager retinal file copy error', msg)
-    
-def run():
-    #Check if previous call of backup manager is complete
-    with open(logfile_path) as f:
-        txt=f.read()
-    lines=txt.split('\n')[:-1]
-    done_lines = [lines.index(l) for l in lines if 'done' in l]
-    started_lines = [lines.index(l) for l in lines if 'Check network drives' in l]
-    if done_lines[-1]<started_lines[-1]:
-        ds=[l.split('\t')[0] for l in lines][started_lines[-1]].split(',')[0]
-        format="%Y-%m-%d %H:%M:%S"
-        if time.time()-time.mktime(datetime.datetime.strptime(ds, format).timetuple())<2*60*60:#If last start happend 3 hours before, assume that there was an error and backup can be started again
-            return
-    logging.basicConfig(filename= logfile_path,
-                    format='%(asctime)s %(levelname)s\t%(message)s',
-                    level=logging.DEBUG)
-    q=Queue.Queue()
-    wd=threading.Thread(target=watchdog,args=(2*60,q))
-    wd.start()
-    #time.sleep(150)
-    logging.info('Check network drives')
-    if not is_mounted():
-        msg='Tape or m mdrive not mounted: tape: {0}, m: {1}'.format(os.path.ismount('/mnt/tape'), os.path.ismount('/mnt/mdrive'))
-        logging.error(msg)
-        sendmail('zoltan.raics@fmi.ch', 'backup manager mount error', msg)
-        return
-    q.put('terminate')
-    wd.join()
-    logging.info('listing rawdata files')
-    files = list_all_files(transient_backup_path)
-    files.sort()
-    
-    for f in files:
-        copy_file(f)
-        
-    #Copy processed datafiles from rlvivo to m drive
-    logging.info('listing processed files')
-    files = list_all_files(transient_processed_files)
-    files.sort()
-    for f in files:
-        copy_processed_file(f)
-        
-    rei_backup()
-    logging.info('done')
-
 if __name__ == "__main__":
-    run()
+    if len(sys.argv)==1:
+        unittest.main()
+    else:
+        cc=getattr(sys.modules[__name__], sys.argv[1])()
+        BackupManager(cc).run()

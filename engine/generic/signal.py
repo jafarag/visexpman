@@ -34,7 +34,11 @@ def histogram_shift(data, output_range, min = None, max = None, gamma = 1.0, ban
     
 def scale(data, output_range_min = 0.0, output_range_max =1.0):
     return (numpy.cast['float'](data) - data.min())/(data.max() - data.min())*(output_range_max - output_range_min)+output_range_min
-
+    
+def coo_range(d):
+    return d.max(axis=0)-d.min(axis=0)
+    
+    
 def greyscale(im, weights = numpy.array([1.0, 1.0, 1.0])):
     '''
     If im is uint8, the result is scaled back to the range of this datatype
@@ -55,7 +59,10 @@ def greyscale(im, weights = numpy.array([1.0, 1.0, 1.0])):
        
 ############## Waveform generation ##############
 def time_series(duration, fs):
-    return numpy.linspace(0, duration, duration*fs+1)
+    if isinstance(duration, float):
+        return numpy.linspace(0, duration, int(numpy.round(duration*fs))+1)
+    elif isinstance(duration, int):
+        return numpy.arange(duration,dtype=numpy.float)/fs
 
 def wf_sin(a, f, duration, fs, phase = 0, offset = 0):
     t = time_series(duration, fs)
@@ -64,10 +71,10 @@ def wf_sin(a, f, duration, fs, phase = 0, offset = 0):
 def wf_triangle(a, t_up, t_down, duration, fs, offset = 0):
     if t_up + t_down > duration:
         raise ValueError('t_up and t_down must be less than duration')
-    nsample_up = t_up*fs
-    nsample_down = t_down*fs
+    nsample_up = int(numpy.round(t_up*fs))
+    nsample_down = int(numpy.round(t_down*fs))
     triangle = numpy.concatenate((numpy.linspace(a/nsample_up, a, nsample_up), numpy.linspace(a-a/nsample_down, 0, nsample_down)))
-    sig = numpy.zeros(int(fs*duration))
+    sig = numpy.zeros(int(numpy.round(fs*duration)))
     triangle = numpy.tile(triangle, sig.shape[0]/triangle.shape[0])
     sig[:triangle.shape[0]] = triangle
     return sig+offset
@@ -102,7 +109,7 @@ def generate_natural_stimulus_intensity_profile(duration, speed, minimal_spatial
     if minimal_spatial_period < 5 * spatial_resolution:
         raise RuntimeError('minimal_spatial_period ({0}) shall be bigger than 5 x spatial_resolution ({0}) ' .format(minimal_spatial_period, spatial_resolution))
     spatial_frequencies = numpy.arange(1.0/spatial_range, 1.0/minimal_spatial_period+1.0/spatial_range, 1.0/spatial_range)
-    amplitudes = 1.0/spatial_frequencies
+    amplitudes = numpy.sqrt(1.0/spatial_frequencies**2)#Power spectrum of sunlight which is 1/f**2
     phases = generate_random_angles(spatial_frequencies.shape[0])
     #Since the number fo samples have to be integer, the spatial resolution is slightly modified
     modified_spatial_resolution = float(spatial_range/spatial_resolution)/int(spatial_range/spatial_resolution)*spatial_resolution
@@ -201,10 +208,145 @@ def signal2binary(waveform):
     Signal is considered true/logic 1 when signal reached the 'high' voltage level (transient is considered as False)
     '''
     return numpy.where(waveform > numpy.histogram(waveform, bins = 10)[1][-2],  True,  False)
-
     
-def trigger_indexes(trigger):
-    return numpy.nonzero(numpy.where(abs(numpy.diff(trigger-trigger.min()))>0.5*(trigger.max()-trigger.min()), 1, 0))[0]+1
+def trigger_indexes(trigger,threshold=0.3, abs_threshold=None):
+    '''
+    Indexes of rising edges in trigger are returned
+    '''
+    if abs_threshold!=None and trigger.max()<abs_threshold:
+        return numpy.array([])
+    return numpy.nonzero(abs(numpy.diff(numpy.where(trigger-trigger.min()>threshold*(trigger.max()-trigger.min()),1,0))))[0]+1
+    #return numpy.nonzero(numpy.where(abs(numpy.diff(trigger-trigger.min()))>threshold*(trigger.max()-trigger.min()), 1, 0))[0]+1
+    
+def detect_edges(signal, threshold):
+    return numpy.nonzero(numpy.diff(numpy.where(signal>threshold,1,0)))[0]+1
+    
+def generate_bins(signal, binsize):
+    '''
+    generate bins such that it is aligned to binsize
+    '''
+    nsteps_lower=signal.min()/binsize
+    range_min=numpy.ceil(abs(nsteps_lower))*numpy.sign(nsteps_lower)*binsize
+    nsteps_upper=numpy.ceil(signal.max()/binsize)
+    range_max=nsteps_upper*binsize
+    bins=numpy.arange(range_min,range_max,binsize)
+    bins=numpy.append(bins, range_max)
+    return bins
+
+def images2mip(rawdata, timeseries_dimension = 0):
+    return rawdata.max(axis=timeseries_dimension)
+    
+def time2index(times,timepoint):
+    '''
+    tells at which index happend timepoint in times 
+    '''
+    return numpy.where(times>timepoint)[0][0]
+        
+def df_over_f(t, x, tstim, baseline_length):
+    baseline = x[numpy.where(numpy.logical_and(t<tstim,t>tstim-baseline_length))].mean()
+    return x / baseline - 1.0
+    
+def average_of_traces(x,y):
+    if len(x) != len(y):
+        raise RuntimeError('x and y should have the same length: {0}, {1}'.format(len(x), len(y)))
+    #Find the common x range
+    common_x_min = max([xi.min() for xi in x])
+    common_x_max = min([xi.max() for xi in x])
+    indexes = numpy.array([numpy.where(numpy.logical_and(x[i]>=common_x_min, x[i]<=common_x_max))[0] for i in range(len(y))])
+    length = min([i.shape[0] for i in indexes])
+    indexes = numpy.array([i[:length] for i in indexes])
+    y_average = numpy.array([y[i][indexes[i]] for i in range(len(y))]).mean(axis=0)
+    x_average = numpy.array([x[i][indexes[i]] for i in range(len(x))]).mean(axis=0)
+    return x_average, y_average
+    
+def signal_shift(sig1,sig2):
+    c=numpy.correlate(sig1,sig2,'same')
+    return sig1.shape[0]/2-c.argmax()
+
+def downsample_2d_array(ar, fact):
+    from scipy import ndimage
+    assert isinstance(fact, int), type(fact)
+    sx, sy = ar.shape
+    X, Y = numpy.ogrid[0:sx, 0:sy]
+    regions = sy/fact * (X/fact) + Y/fact
+    res = ndimage.mean(ar, labels=regions, index=numpy.arange(regions.max() + 1))
+    res.shape = (sx/fact, sy/fact)
+    return res
+    
+def downsample_2d_array_1_arg(arg):
+    ar, fact=arg
+    return downsample_2d_array(ar, fact)
+    
+def downsample_2d_rgbarray(ar, fact,pool=None):
+    newshape=(numpy.array(ar.shape[:2])/fact).tolist()
+    newshape.append(3)
+    out=numpy.zeros(newshape,dtype=ar.dtype)
+    if pool is not None:
+        pars=[(ar[:,:,ci],fact) for ci in range(ar.shape[2])]
+        res=pool.map(downsample_2d_array_1_arg,pars)
+        for i in range(len(res)):
+            out[:,:,i]=res[i]
+    else:
+        for ci in range(ar.shape[2]):
+            out[:,:,ci]=downsample_2d_array(ar[:,:,ci],fact)
+    return out
+    
+def to_16bit(data):
+    datarange=data.max()-data.min()
+    scale=(2**16-1)/datarange
+    offset=data.min()
+    scaled=numpy.cast['uint16']((data-offset)*scale)
+    scale={'scale':scale, 'offset':offset, 'range':datarange}
+    return scaled, scale
+    
+def from_16bit(scaled,scale):
+    s=numpy.cast['float'](scaled)
+    s/=scale['scale']
+    s+=scale['offset']
+    return s
+    
+def measure_sin(sig,  fsample,  p0=[1, 1, 0, 0]):
+    import scipy.optimize
+    def sinus(x, a, f, ph, o):
+        return a*numpy.sin(numpy.pi*2*x*f+ph)+o
+    t=numpy.arange(sig.shape[0])/float(fsample)
+    par,  cov=scipy.optimize.curve_fit(sinus, t, sig, p0=p0)
+    a, f, ph, o=par
+    return a, f
+    
+def shape2distance(im,iterations):
+    '''
+    im is a binay image representing one object.
+    The output is an image showing the distance of each pixel in the object 
+    from the edge
+    '''
+    import scipy.ndimage.morphology, scipy.ndimage.filters
+    input=im.copy()
+    stages=[input.copy()]
+    output=numpy.zeros_like(im)
+    for i in range(int(iterations)):
+        input=scipy.ndimage.morphology.binary_erosion(input)
+        stages.append(input.copy())
+        output+=numpy.cast['uint8'](input.copy())*(i+1)
+    return output
+    
+def generate_frequency_modulated_waveform(duration, base_frequency, frequency_step, switch_frequency, fsample,step=True):
+    f1=base_frequency+frequency_step
+    f2=base_frequency-frequency_step
+    if step:
+        on_waveform=numpy.sin(numpy.arange(fsample*0.5/switch_frequency)/fsample*2*numpy.pi*f1)
+        off_waveform=numpy.sin(numpy.arange(fsample*0.5/switch_frequency)/fsample*2*numpy.pi*f2)
+        nshift_periods=int(duration*switch_frequency)
+        return numpy.tile(numpy.concatenate((on_waveform, off_waveform)),nshift_periods)
+    else:
+        t=time_series(float(duration), fsample)
+        frequency_values=numpy.sin(t* 2* numpy.pi* switch_frequency)*0.5*abs(f2-f1)+0.5*abs(f2-f1)+f2
+        #Reduce frequency levels
+  #      fround=int(fsample/100)
+#        frequency_values=(numpy.round(frequency_values/fround)*fround)
+        frequency_values=numpy.round(frequency_values,-2)
+        sig=numpy.sin(t*numpy.pi*2*frequency_values)
+        return sig
 
 class TestSignal(unittest.TestCase):
     def test_01_histogram_shift_1d(self):
@@ -304,10 +446,14 @@ class TestSignal(unittest.TestCase):
         fs = 10000
         sig = wf_triangle(a, t_up, t_down, duration, fs)
         self.assertNotEqual(abs(sig).sum(), 0)
-        
-            
+
     def test_10_generate_natural_stimulus_intensity_profile(self):
-        profile = generate_natural_stimulus_intensity_profile(20.0, 300.0, 20.0,2.0)
+        #duration, speed, minimal_spatial_period, spatial_resolution
+        profile = generate_natural_stimulus_intensity_profile(40.0, 300.0, 20.0,2.0)
+#        from pylab import plot,show,figure
+#        figure(1);plot(profile);plot(profile*0.5+0.5)
+#        figure(2);plot(abs(numpy.fft.fft(profile))/profile.shape[0]);plot(abs(numpy.fft.fft(profile*0.5+0.5))/profile.shape[0]);show()
+
         if 0:
             from pylab import plot,show
             plot(profile)
@@ -322,7 +468,80 @@ class TestSignal(unittest.TestCase):
         occurence_of_longest_period = 1.0
         n0 = 10
         v = natural_distribution_morse(duration, sample_time, occurence_of_longest_period = 1.0, n0 = 10)
-        pass
+    
+    def test_13_sinesweep(self):
+        ao_sample_rate = 500000
+        amplitudes = [1.0, 2.0]
+        frq = numpy.arange(100,1500,100)
+        frq = numpy.insert(frq, 0, 10)
+        nperiods = 10
+        waveform,boundaries,af = sweep_sin(amplitudes, frq, nperiods, ao_sample_rate)
+        if 0:
+            from pylab import plot,show
+            plot(waveform)
+            plot(boundaries)
+            show()
+            
+    def test_14_trigger_indexes(self):
+        trigger = numpy.concatenate((numpy.zeros(2), numpy.ones(10), numpy.zeros(10), numpy.ones(20), numpy.zeros(10)))
+        numpy.testing.assert_equal(trigger_indexes(trigger), numpy.array([2, 12, 22, 42]))
+    
+    def test_15_average_of_traces(self):
+        x=[numpy.arange(0,10), numpy.arange(-2,5), numpy.arange(0,9)+0.1]
+        y=[numpy.arange(10),2*numpy.arange(7), 3*numpy.arange(9)]
+        x_, y_ = average_of_traces(x,y)
+        self.assertEqual(x_.shape,y_.shape)
+        import hdf5io
+        rois = utils.array2object(hdf5io.read_item('/home/rz/rzws/test_data/trace_avg/trace_avg.hdf5','rois', filelocking=False))
+        x = [hdf5io.read_item('/home/rz/rzws/test_data/trace_avg/trace_avg.hdf5','timg', filelocking=False)]
+        y = [rois[0]['normalized']]
+        x.append(rois[0]['matches']['/mnt/rzws/experiment_data/test/20150310/C1_3371241139/data_C1_unknownstim_1425992998_0.hdf5']['timg'])
+        y.append(rois[0]['matches']['/mnt/rzws/experiment_data/test/20150310/C1_3371241139/data_C1_unknownstim_1425992998_0.hdf5']['normalized'])
+        x_, y_ = average_of_traces(x,y)
+        
+    def test_15_signal_shift(self):
+        signal1=numpy.zeros(100)
+        signal1[10:20]=1
+        signal2=numpy.roll(signal1,10)
+        self.assertEqual(signal_shift(signal1,signal2),10)
+        
+    def test_16_downsample_2d_array(self):
+        a=numpy.random.random((100,100))
+        res=downsample_2d_array(a,10)
+        numpy.testing.assert_array_equal(numpy.array(a.shape), numpy.array(res.shape)*10)
+        a=numpy.random.random((100,100,3))
+        import multiprocessing
+        import introspect
+        pool=multiprocessing.Pool(introspect.get_available_process_cores())
+        res=downsample_2d_rgbarray(a,2,pool)
+        numpy.testing.assert_array_equal(numpy.array(a.shape[:2]), numpy.array(res.shape[:2])*2)
+        
+    def test_17_scale_16bit(self):
+        data=numpy.random.random((1000,100))*200-50
+#        data=numpy.arange(-10,10)
+        s,sc=to_16bit(data)
+        data_= from_16bit(s,sc)
+        numpy.testing.assert_array_almost_equal(data,data_,2)
+        
+    def test_18_shape2distance(self):
+        from PIL import Image
+        from fileop import visexpman_package_path
+        from pylab import imshow,show,figure
+        import os
+        im=numpy.asarray(Image.open(os.path.join(visexpman_package_path(), 'data', 'images', 'cross.png')))
+        d=shape2distance(im, 4)
+        imshow(d)
+        show()
+        #im=numpy.zeros((16,16),dtype=numpy.uint8)
+        #im[2:14, 2:14]=1
+        #d=shape2distance(im, 5)
+        
+    def test_19_fm(self):
+        generate_frequency_modulated_waveform(10, 15e3, 1e3, 10,48e3)
+        generate_frequency_modulated_waveform(10, 15e3, 1e3, 1,48e3,False)
+        
+        
+    
 
 if __name__=='__main__':
     unittest.main()

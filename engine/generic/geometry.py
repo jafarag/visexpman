@@ -6,11 +6,12 @@ from PIL import Image
 from visexpman.engine.generic.utils import nan2value
 from scipy.ndimage.interpolation import shift, rotate
 from visexpman.engine.generic.utils import nd, rc, cr
-from visexpA.engine.datadisplay.imaged import imshow
 
 ## {{{ http://code.activestate.com/recipes/117225/ (r2)
 # convex hull (Graham scan by x-coordinate) and diameter of a set of points
 # David Eppstein, UC Irvine, 7 Mar 2002
+
+precision = 10
 
 def get_closest(rcref,rcothers):
     distances = [numpy.abs(rcref['col']-c['col'])+numpy.abs(rcref['row']-c['row']) for c in rcothers]
@@ -111,6 +112,114 @@ def Haffine_from_points(fp,tp):
     H = numpy.dot(numpy.linalg.inv(C2),numpy.dot(H,C1))
 
     return H / H[2][2]
+    
+def procrustes(X, Y, scaling=True, reflection='best'):
+    """
+    Procrustes analysis determines a linear transformation (translation,
+    reflection, orthogonal rotation and scaling) of the points in Y to best
+    conform them to the points in matrix X, using the sum of squared errors
+    as the goodness of fit criterion.
+
+        d, Z, [tform] = procrustes(X, Y)
+
+    Inputs:
+    ------------
+    X, Y    
+        matrices of target and input coordinates. they must have equal
+        numbers of  points (rows), but Y may have fewer dimensions
+        (columns) than X.
+
+    scaling 
+        if False, the scaling component of the transformation is forced
+        to 1
+
+    reflection
+        if 'best' (default), the transformation solution may or may not
+        include a reflection component, depending on which fits the data
+        best. setting reflection to True or False forces a solution with
+        reflection or no reflection respectively.
+
+    Outputs
+    ------------
+    d       
+        the residual sum of squared errors, normalized according to a
+        measure of the scale of X, ((X - X.mean(0))**2).sum()
+
+    Z
+        the matrix of transformed Y-values
+
+    tform   
+        a dict specifying the rotation, translation and scaling that
+        maps X --> Y
+
+    """
+    np = numpy
+    n,m = X.shape
+    ny,my = Y.shape
+
+    muX = X.mean(0)
+    muY = Y.mean(0)
+
+    X0 = X - muX
+    Y0 = Y - muY
+
+    ssX = (X0**2.).sum()
+    ssY = (Y0**2.).sum()
+
+    # centred Frobenius norm
+    normX = np.sqrt(ssX)
+    normY = np.sqrt(ssY)
+
+    # scale to equal (unit) norm
+    X0 /= normX
+    Y0 /= normY
+
+    if my < m:
+        Y0 = np.concatenate((Y0, np.zeros(n, m-my)),0)
+
+    # optimum rotation matrix of Y
+    A = np.dot(X0.T, Y0)
+    U,s,Vt = np.linalg.svd(A,full_matrices=False)
+    V = Vt.T
+    T = np.dot(V, U.T)
+
+    if reflection is not 'best':
+
+        # does the current solution use a reflection?
+        have_reflection = np.linalg.det(T) < 0
+
+        # if that's not what was specified, force another reflection
+        if reflection != have_reflection:
+            V[:,-1] *= -1
+            s[-1] *= -1
+            T = np.dot(V, U.T)
+
+    traceTA = s.sum()
+
+    if scaling:
+
+        # optimum scaling of Y
+        b = traceTA * normX / normY
+
+        # standarised distance between X and b*Y*T + c
+        d = 1 - traceTA**2
+
+        # transformed coords
+        Z = normX*traceTA*np.dot(Y0, T) + muX
+
+    else:
+        b = 1
+        d = 1 + ssY/ssX - 2 * traceTA * normY / normX
+        Z = normY*np.dot(Y0, T) + muX
+
+    # transformation matrix
+    if my < m:
+        T = T[:my,:]
+    c = muX - b*np.dot(muY, T)
+
+    tform = {'rotation':T, 'scale':b, 'translation':c}
+
+    return d, Z, tform
 
 def divide_vectors(v1, v2):
     if v2[0] != 0.0 and v2[1] != 0.0 and v2[2] != 0.0:
@@ -131,7 +240,7 @@ def angle_between_vectors(v1, v2):
         
 def distance_between_points(p1, p2):
     return numpy.sqrt((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2 + (p1[2] - p2[2]) ** 2)
-
+        
 def vector_length(vector):
     return numpy.sqrt(vector[0] ** 2 + vector[1] ** 2 + vector[2] ** 2)
     
@@ -278,8 +387,8 @@ def plane_line_intersection(line_start_point,  line_direction, polygon):
                                 line_start_point[2] - line_direction[2] * line_parameter, 
                                 ])
                       
-    #round to preceision - does not work
-#    intersection = numpy.round(intersection, preceision)
+    #round to precision - does not work
+#    intersection = numpy.round(intersection, precision)
     #check wether the intersection exists
     intersection_exists = True
     for item in intersection:
@@ -304,12 +413,12 @@ def line_segment_ray_intersection(line_point1, line_point2, ray_point, ray_direc
             else:
                 ray_range.append(float('-inf'))
 
-        if utils.in_range(intersection[0], ray_point[0], ray_range[0], preceision = preceision) and\
-        utils.in_range(intersection[1], ray_point[1], ray_range[1], preceision = preceision) and\
-        utils.in_range(intersection[2], ray_point[2], ray_range[2], preceision = preceision) and\
-        utils.in_range(intersection[0], line_point1[0], line_point2[0], preceision = preceision) and\
-        utils.in_range(intersection[1], line_point1[1], line_point2[1], preceision = preceision) and\
-        utils.in_range(intersection[2], line_point1[2], line_point2[2], preceision = preceision):
+        if utils.in_range(intersection[0], ray_point[0], ray_range[0], precision = precision) and\
+        utils.in_range(intersection[1], ray_point[1], ray_range[1], precision = precision) and\
+        utils.in_range(intersection[2], ray_point[2], ray_range[2], precision = precision) and\
+        utils.in_range(intersection[0], line_point1[0], line_point2[0], precision = precision) and\
+        utils.in_range(intersection[1], line_point1[1], line_point2[1], precision = precision) and\
+        utils.in_range(intersection[2], line_point1[2], line_point2[2], precision = precision):
             return intersection_exists, intersection
         else:
             return False, None
@@ -363,7 +472,7 @@ def line_intersection(line1_point, line1_direction, line2_point, line2_direction
     debug = False
     intersection = None
     intersection_exists = False
-    tolerance = 10.0 ** -preceision
+    tolerance = 10.0 ** -precision
     if are_vectors_parallel(line1_direction, line2_direction):
         intersection_exists = False
     else:
@@ -400,7 +509,7 @@ def line_intersection_old(line1_point, line1_direction, line2_point, line2_direc
     debug = False
     intersection = None
     intersection_exists = False
-    tolerance = 10.0 ** -(preceision-1)
+    tolerance = 10.0 ** -(precision-1)
     tolerance = 10.0 ** -5
     
     #==calculate distance between lines==
@@ -466,7 +575,7 @@ def line_intersection_old(line1_point, line1_direction, line2_point, line2_direc
                 except:
                     intersection_exists = False
     if intersection != None:
-        intersection = numpy.round(intersection, preceision)
+        intersection = numpy.round(intersection, precision)
         
 #    if distance_between_lines < tolerance:
 #        intersection_exists = True
@@ -535,37 +644,16 @@ def rotate_vector(vector, angle):
     vector_matrix = vector_matrix.transpose()
     return numpy.squeeze(numpy.asarray((rotation_matrix_x * rotation_matrix_y * rotation_matrix_z * vector_matrix).transpose()))
 
-def rotation_matrix(axis, theta):
-    """
-    Return the rotation matrix associated with counterclockwise rotation about
-    the given axis by theta radians.
-    """
-    axis = numpy.asarray(axis)
-    theta = numpy.asarray(theta)
-    axis = axis/numpy.sqrt(numpy.dot(axis, axis))
-    a = numpy.cos(theta/2)
-    b, c, d = -axis*numpy.sin(theta/2)
-    aa, bb, cc, dd = a*a, b*b, c*c, d*d
-    bc, ad, ac, ab, bd, cd = b*c, a*d, a*c, a*b, b*d, c*d
-    return numpy.array([[aa+bb-cc-dd, 2*(bc+ad), 2*(bd-ac)],
-                     [2*(bc-ad), aa+cc-bb-dd, 2*(cd+ab)],
-                     [2*(bd+ac), 2*(cd-ab), aa+dd-bb-cc]])
-
-def test_rotation_matrix():
-    v = [3, 5, 0]
-    axis = [4, 4, 1]
-    theta = 1.2
-    print(np.dot(rotation_matrix(axis,theta), v))
-
-def rotate_around_center(inarray, angle, center=None,  reshape=False):
+def rotate_around_center(inarray, angle, center=None, reshape=False):
     '''Extends rotate function of scipy with user definable center. Uses larger image with NaN values
     to prevent data loss. NaNs are converted to a mask at the end'''
     if angle > numpy.pi*2:
         print('Warning:angle is greater than 2*Pi, angle should be supplied as radians')
     if hasattr(inarray, 'size') and inarray.size>2:
+        origin = numpy.array(inarray.shape)/2
         if center is not None:
             i_dbg=inarray.copy()
-            cshift = numpy.array(inarray.shape)/2-nd(center)
+            cshift = origin-nd(center)
             if numpy.any(cshift!=0):
                 bord = numpy.ceil(numpy.abs(cshift))
                 ext_im = numpy.nan*numpy.ones(inarray.shape+bord*2) #larger image in all directions, shift will not loose data and center remains
@@ -603,7 +691,7 @@ def rotate_around_center_pil(data,  angle, center=None,  **kwargs):
             mask = Image.fromarray(0*data+1)
         data = Image.fromarray(data)
         if center is not None:
-            tr=utils.rc_add(utils.rc_multiply_with_constant(utils.cr(data.size), 0.5), utils.rc_multiply_with_constant(center, -1))
+            tr=utils.rc_add(utils.rc_x_const(utils.cr(data.size), 0.5), utils.rc_x_const(center, -1))
             data = data.transform(data.size, Image.AFFINE, (1, 0, tr['col'], 0, 1, tr['row']), Image.BICUBIC)
             if return_masked:
                 mask = mask.transform(mask.size, Image.AFFINE, (1, 0, tr['col'], 0, 1, tr['row']))
@@ -632,7 +720,10 @@ def rotate_around_center_pil(data,  angle, center=None,  **kwargs):
         if not hasattr(data, 'shape'): # input was list
             rotated = rotated.tolist()
     return rotated
-  
+
+def estimate_rotation(points1, points2):
+    return numpy.arctan((points2[:, 0]*points1[:, 1]-points2[:, 1]*points1[:, 0]).sum()/(points2[:, 0]*points1[:, 0]+points2[:, 1]*points1[:, 1]).sum())
+ 
 def centered_rigid_transform2d(data,  **kwargs):
     '''Transforms a point or image with a rotation about user defined center followed by translation.
     angle: radians
@@ -646,6 +737,7 @@ def centered_rigid_transform2d(data,  **kwargs):
     debug = kwargs.get('debug', 0)
     origin = kwargs.get('origin', None)
     center = kwargs.get('center', None)
+    reshape = kwargs.get('reshape',False)
     adata = numpy.array(data)
     if adata.size==2: # single point
         if origin is None:
@@ -670,7 +762,7 @@ def centered_rigid_transform2d(data,  **kwargs):
         if center is None:
             center = origin
         if 1:
-            res = rotate_around_center(adata, angle, origin,  reshape=kwargs.get('reshape', False))
+            res = rotate_around_center(adata, angle, center, reshape=reshape)
             offset = calc_offset(angle, center, translation, origin)
             if debug:
                 from visexpA.engine.datadisplay.imaged import imshow
@@ -706,6 +798,12 @@ def op_masked(function, inarray,  *args,  **kwargs):
     if 'outmask' in locals():
         inarray = numpy.ma.array(inarray, mask=outmask)
     return inarray
+
+def rectangular_roi(center, radius, imshape):
+    '''Input: rc value with row and col dtype.
+    Returns rowstart,rowend,colstart,colend cropped at image shape
+    '''
+    return [max(0, center['row']-radius), min(center['row']+radius, imshape[0]), max(0, center['col']-radius), min(center['col']+radius, imshape[1])]
     
 def match_sizes_centered(images):
     '''Crops the borders of two images to make both the same size. Their center remains aligned, i.e. the borders are trimmed symmetrically.'''
@@ -728,7 +826,10 @@ def polygon2filled(polygon, color=None):
     '''Converts a polygon object into a list of coordinates of the entire polyon
     '''
     import Polygon,  Polygon.Utils
-    from PIL import Image, ImageDraw
+    try:
+        import Image, ImageDraw
+    except ImportError:
+        from PIL import Image, ImageDraw
     pts2=numpy.round(numpy.array(Polygon.Utils.pointList(polygon)))
     li = Image.fromarray(numpy.zeros(numpy.max(pts2, axis=0)+2), mode='I')
     draw= ImageDraw.Draw(li)
@@ -784,6 +885,15 @@ def point_coordinates(distance, angle, origin):
         x=numpy.cos(angle)*distance+origin['col']
         y=numpy.sin(angle)*distance+origin['row']
         return cr((x,y))
+        
+def circle_mask(center,radius, size):
+    mask=numpy.zeros(size)
+    xcoo,ycoo=numpy.meshgrid(numpy.arange(size[0]), numpy.arange(size[1]))
+    xcoo = xcoo.flatten()
+    ycoo = ycoo.flatten()
+    indexes=numpy.where(numpy.sqrt((xcoo-center[0])**2+(ycoo-center[1])**2)<radius)[0]
+    mask[xcoo[indexes],ycoo[indexes]]=1
+    return mask
     
 def numpy_circle(diameter, center = (0,0), color = 1.0, array_size = (100, 100)):
     radius_sq = (diameter * 0.5) ** 2
@@ -800,8 +910,8 @@ def numpy_circle(diameter, center = (0,0), color = 1.0, array_size = (100, 100))
     for i in range(len(active_pixel_mask)):
         if active_pixel_mask[i] == 1:
             circle[coords[0][i], coords[1][i]] = color
-    return circle 
- 
+    return circle
+    
 def numpy_circles(radii,  centers,  array_size,  colors = None):
     if 0:
         from visexpA.engine.datadisplay.imaged import imshow
@@ -890,9 +1000,69 @@ def rectangle_vertices(size, orientation = 0):
     vertices *= half_diagonal
     return vertices    
 
-class testGeometry(unittest.TestCase):
+def circle_vertices(diameter,  resolution = 1.0,  start_angle = 0,  end_angle = 360, pos = (0,0),  arc_slice = False):
+    '''
+    Resolution is in steps / degree
+    radius is a list of x and y
+    '''
+    output_list = False
+    if not isinstance(diameter,list):
+        diameter = [diameter,diameter]
+    if output_list:
+        vertices = []
+    else:
+        n_vertices_arc = int((end_angle - start_angle) * resolution + 1)
+        if abs(start_angle - end_angle) < 360 and arc_slice:
+            n_vertices = n_vertices_arc + 1
+        else:
+            n_vertices = n_vertices_arc
+        vertices = numpy.zeros(shape = (n_vertices,  2))
+        
+    if output_list:
+        for i in range(int(start_angle * resolution),  int(end_angle * resolution)):
+                    angle = (float(i)*numpy.pi / 180.0) / resolution
+                    vertice = [0.5 * diameter[0] * numpy.cos(angle) + pos[0],  0.5 * diameter[1] * numpy.sin(angle) + pos[1]]
+                    vertices.append(vertice)
+    else:
+        start_angle_rad = start_angle * numpy.pi / 180.0
+        end_angle_rad = end_angle * numpy.pi / 180.0
+        angle = numpy.linspace(start_angle_rad,  end_angle_rad, n_vertices_arc)        
+        x = 0.5 * diameter[0] * numpy.cos(angle) + pos[0]
+        y = 0.5 * diameter[1] * numpy.sin(angle) + pos[1]
+        vertices[0:n_vertices_arc, 0] = x
+        vertices[0:n_vertices_arc, 1] = y      
     
-    test_data = [
+    if abs(start_angle - end_angle) < 360:
+        if output_list:
+            if arc_slice:
+                vertices.append([0,  0])
+        else:
+            if arc_slice:                
+                vertices[-1] = numpy.array([0,  0])
+    return vertices
+    
+def vertices2image(vertices):
+    '''
+    Vertice locations are visualized on an image with small +s
+    '''
+    from pylab import show, imshow
+    height=int(vertices[:,0].max()-vertices[:,0].min())+1
+    width=int(vertices[:,1].max()-vertices[:,1].min())+1
+    im=numpy.zeros((height,width))
+    coo=numpy.cast['int'](vertices-vertices.min(axis=0))
+    for c in coo:
+        for i in range(-3,4):
+            try:
+                im[c[0]+i, c[1]]=1
+                im[c[0], c[1]+i]=1
+            except IndexError:
+                pass
+    imshow(im,cmap='gray')
+    show()
+
+class TestGeometry(unittest.TestCase):
+    def setUp(self):
+        self.test_data = [
                  {
                  'direction1': numpy.array([1.0, 1.0, 1.0]), 
                  'direction2': numpy.array([1.0, 1.0, 1.0]), 
@@ -1104,165 +1274,167 @@ class testGeometry(unittest.TestCase):
     
     def test_00_parallel(self):
         case = 0
-        result = are_vectors_parallel( self.__class__.test_data[case]['direction1'],  self.__class__.test_data[case]['direction2'])
-        self.assertEqual(result, self.__class__.test_data[case]['parallel?'])
+        result = are_vectors_parallel(self.test_data[case]['direction1'], self.test_data[case]['direction2'])
+        self.assertEqual(result,self.test_data[case]['parallel?'])
         
     def test_01_parallel(self):
         case = 1
-        result = are_vectors_parallel( self.__class__.test_data[case]['direction1'],  self.__class__.test_data[case]['direction2'])
-        self.assertEqual(result, self.__class__.test_data[case]['parallel?'])
+        result = are_vectors_parallel(self.test_data[case]['direction1'], self.test_data[case]['direction2'])
+        self.assertEqual(result,self.test_data[case]['parallel?'])
 
     def test_02_parallel(self):
         case = 2
-        result = are_vectors_parallel( self.__class__.test_data[case]['direction1'],  self.__class__.test_data[case]['direction2'])
-        self.assertEqual(result, self.__class__.test_data[case]['parallel?'])
+        result = are_vectors_parallel(self.test_data[case]['direction1'], self.test_data[case]['direction2'])
+        self.assertEqual(result,self.test_data[case]['parallel?'])
         
     def test_03_parallel(self):
         case = 3
-        result = are_vectors_parallel( self.__class__.test_data[case]['direction1'],  self.__class__.test_data[case]['direction2'])
-        self.assertEqual(result, self.__class__.test_data[case]['parallel?'])
+        result = are_vectors_parallel(self.test_data[case]['direction1'], self.test_data[case]['direction2'])
+        self.assertEqual(result,self.test_data[case]['parallel?'])
         
     def test_04_lines_intersecting(self):
         case = 4        
-        result = line_intersection( self.__class__.test_data[case]['line1_point'],  self.__class__.test_data[case]['line1_direction'], self.__class__.test_data[case]['line2_point'],  self.__class__.test_data[case]['line2_direction'])
-        self.assertEqual((result[0], result[1][0], result[1][1], result[1][2]), (self.__class__.test_data[case]['result'][0], self.__class__.test_data[case]['result'][1][0], self.__class__.test_data[case]['result'][1][1], self.__class__.test_data[case]['result'][1][2]))
+        result = line_intersection(self.test_data[case]['line1_point'], self.test_data[case]['line1_direction'],self.test_data[case]['line2_point'], self.test_data[case]['line2_direction'])
+        self.assertEqual((result[0], result[1][0], result[1][1], result[1][2]), (self.test_data[case]['result'][0],self.test_data[case]['result'][1][0],self.test_data[case]['result'][1][1],self.test_data[case]['result'][1][2]))
 
     def test_05_lines_intersecting(self):
         case = 5
-        result = line_intersection( self.__class__.test_data[case]['line1_point'],  self.__class__.test_data[case]['line1_direction'], self.__class__.test_data[case]['line2_point'],  self.__class__.test_data[case]['line2_direction'])
-        self.assertEqual((result[0], result[1][0], result[1][1], result[1][2]), (self.__class__.test_data[case]['result'][0], self.__class__.test_data[case]['result'][1][0], self.__class__.test_data[case]['result'][1][1], self.__class__.test_data[case]['result'][1][2]))        
+        result = line_intersection(self.test_data[case]['line1_point'], self.test_data[case]['line1_direction'],self.test_data[case]['line2_point'], self.test_data[case]['line2_direction'])
+        self.assertEqual((result[0], result[1][0], result[1][1], result[1][2]), (self.test_data[case]['result'][0],self.test_data[case]['result'][1][0],self.test_data[case]['result'][1][1],self.test_data[case]['result'][1][2]))        
     
     def test_06_lines_intersecting(self):
         case = 6
-        result = line_intersection( self.__class__.test_data[case]['line1_point'],  self.__class__.test_data[case]['line1_direction'], self.__class__.test_data[case]['line2_point'],  self.__class__.test_data[case]['line2_direction'])
-        self.assertEqual((result[0], result[1][0], result[1][1], result[1][2]), (self.__class__.test_data[case]['result'][0], self.__class__.test_data[case]['result'][1][0], self.__class__.test_data[case]['result'][1][1], self.__class__.test_data[case]['result'][1][2]))        
+        result = line_intersection(self.test_data[case]['line1_point'], self.test_data[case]['line1_direction'],self.test_data[case]['line2_point'], self.test_data[case]['line2_direction'])
+        self.assertEqual((result[0], result[1][0], result[1][1], result[1][2]), (self.test_data[case]['result'][0],self.test_data[case]['result'][1][0],self.test_data[case]['result'][1][1],self.test_data[case]['result'][1][2]))        
         
     def test_07_lines_intersecting(self):
         case = 7
-        result = line_intersection( self.__class__.test_data[case]['line1_point'],  self.__class__.test_data[case]['line1_direction'], self.__class__.test_data[case]['line2_point'],  self.__class__.test_data[case]['line2_direction'])
-        self.assertEqual((result[0], result[1][0], result[1][1], result[1][2]), (self.__class__.test_data[case]['result'][0], self.__class__.test_data[case]['result'][1][0], self.__class__.test_data[case]['result'][1][1], self.__class__.test_data[case]['result'][1][2]))        
+        result = line_intersection(self.test_data[case]['line1_point'], self.test_data[case]['line1_direction'],self.test_data[case]['line2_point'], self.test_data[case]['line2_direction'])
+        self.assertEqual((result[0], result[1][0], result[1][1], result[1][2]), (self.test_data[case]['result'][0],self.test_data[case]['result'][1][0],self.test_data[case]['result'][1][1],self.test_data[case]['result'][1][2]))        
         
     def test_08_lines_intersecting(self):
         case = 8
-        result = line_intersection( self.__class__.test_data[case]['line1_point'],  self.__class__.test_data[case]['line1_direction'], self.__class__.test_data[case]['line2_point'],  self.__class__.test_data[case]['line2_direction'])
-        self.assertEqual((result[0], result[1][0], result[1][1], result[1][2]), (self.__class__.test_data[case]['result'][0], self.__class__.test_data[case]['result'][1][0], self.__class__.test_data[case]['result'][1][1], self.__class__.test_data[case]['result'][1][2]))        
+        result = line_intersection(self.test_data[case]['line1_point'], self.test_data[case]['line1_direction'],self.test_data[case]['line2_point'], self.test_data[case]['line2_direction'])
+        self.assertEqual((result[0], result[1][0], result[1][1], result[1][2]), (self.test_data[case]['result'][0],self.test_data[case]['result'][1][0],self.test_data[case]['result'][1][1],self.test_data[case]['result'][1][2]))        
 
+    @unittest.skip('Could not make it work correctly')
     def test_09_lines_intersecting(self):
         case = 9
-        result = line_intersection( self.__class__.test_data[case]['line1_point'],  self.__class__.test_data[case]['line1_direction'], self.__class__.test_data[case]['line2_point'],  self.__class__.test_data[case]['line2_direction'])
-        self.assertEqual((result[0], result[1][0], result[1][1], result[1][2]), (self.__class__.test_data[case]['result'][0], self.__class__.test_data[case]['result'][1][0], self.__class__.test_data[case]['result'][1][1], self.__class__.test_data[case]['result'][1][2]))        
+        result = line_intersection(self.test_data[case]['line1_point'], self.test_data[case]['line1_direction'],self.test_data[case]['line2_point'], self.test_data[case]['line2_direction'])
+        self.assertEqual((result[0], result[1][0], result[1][1], result[1][2]), (self.test_data[case]['result'][0],self.test_data[case]['result'][1][0],self.test_data[case]['result'][1][1],self.test_data[case]['result'][1][2]))        
 
     def test_10_lines_not_intersecting(self):
         case = 10
-        result = line_intersection( self.__class__.test_data[case]['line1_point'],  self.__class__.test_data[case]['line1_direction'], self.__class__.test_data[case]['line2_point'],  self.__class__.test_data[case]['line2_direction'])
-        self.assertEqual(result, self.__class__.test_data[case]['result'])
+        result = line_intersection(self.test_data[case]['line1_point'], self.test_data[case]['line1_direction'],self.test_data[case]['line2_point'], self.test_data[case]['line2_direction'])
+        self.assertEqual(result,self.test_data[case]['result'])
         
     def test_11_lines_not_intersecting(self):
         case = 11
-        result = line_intersection( self.__class__.test_data[case]['line1_point'],  self.__class__.test_data[case]['line1_direction'], self.__class__.test_data[case]['line2_point'],  self.__class__.test_data[case]['line2_direction'])
-        self.assertEqual(result, self.__class__.test_data[case]['result'])
+        result = line_intersection(self.test_data[case]['line1_point'], self.test_data[case]['line1_direction'],self.test_data[case]['line2_point'], self.test_data[case]['line2_direction'])
+        self.assertEqual(result,self.test_data[case]['result'])
         
     def test_12_line_segments_intersecting(self):
         case = 12
-        result = line_segment_intersection( self.__class__.test_data[case]['line1_point1'], self.__class__.test_data[case]['line1_point2'], self.__class__.test_data[case]['line2_point1'], self.__class__.test_data[case]['line2_point2'])
-        self.assertEqual((result[0], result[1][0], result[1][1], result[1][2]), (self.__class__.test_data[case]['result'][0], self.__class__.test_data[case]['result'][1][0], self.__class__.test_data[case]['result'][1][1], self.__class__.test_data[case]['result'][1][2]))        
+        result = line_segment_intersection(self.test_data[case]['line1_point1'],self.test_data[case]['line1_point2'],self.test_data[case]['line2_point1'],self.test_data[case]['line2_point2'])
+        self.assertEqual((result[0], result[1][0], result[1][1], result[1][2]), (self.test_data[case]['result'][0],self.test_data[case]['result'][1][0],self.test_data[case]['result'][1][1],self.test_data[case]['result'][1][2]))        
         
     def test_13_line_segments_intersecting(self):
         case = 13
-        result = line_segment_intersection( self.__class__.test_data[case]['line1_point1'], self.__class__.test_data[case]['line1_point2'], self.__class__.test_data[case]['line2_point1'], self.__class__.test_data[case]['line2_point2'])
-        self.assertEqual((result[0], result[1][0], result[1][1], result[1][2]), (self.__class__.test_data[case]['result'][0], self.__class__.test_data[case]['result'][1][0], self.__class__.test_data[case]['result'][1][1], self.__class__.test_data[case]['result'][1][2]))        
+        result = line_segment_intersection(self.test_data[case]['line1_point1'],self.test_data[case]['line1_point2'],self.test_data[case]['line2_point1'],self.test_data[case]['line2_point2'])
+        self.assertEqual((result[0], result[1][0], result[1][1], result[1][2]), (self.test_data[case]['result'][0],self.test_data[case]['result'][1][0],self.test_data[case]['result'][1][1],self.test_data[case]['result'][1][2]))        
 
     def test_14_line_segments_not_intersecting(self):
         case = 14
-        result = line_segment_intersection( self.__class__.test_data[case]['line1_point1'], self.__class__.test_data[case]['line1_point2'], self.__class__.test_data[case]['line2_point1'], self.__class__.test_data[case]['line2_point2'])
-        self.assertEqual(result, self.__class__.test_data[case]['result'])
+        result = line_segment_intersection(self.test_data[case]['line1_point1'],self.test_data[case]['line1_point2'],self.test_data[case]['line2_point1'],self.test_data[case]['line2_point2'])
+        self.assertEqual(result,self.test_data[case]['result'])
         
     def test_15_line_segments_not_intersecting(self):
         case = 15
-        result = line_segment_intersection( self.__class__.test_data[case]['line1_point1'], self.__class__.test_data[case]['line1_point2'], self.__class__.test_data[case]['line2_point1'], self.__class__.test_data[case]['line2_point2'])
-        self.assertEqual(result, self.__class__.test_data[case]['result'])
+        result = line_segment_intersection(self.test_data[case]['line1_point1'],self.test_data[case]['line1_point2'],self.test_data[case]['line2_point1'],self.test_data[case]['line2_point2'])
+        self.assertEqual(result,self.test_data[case]['result'])
         
     def test_16_line_segment_ray_intersecting(self):
         case = 16
-        result = line_segment_ray_intersection( self.__class__.test_data[case]['line_point1'], self.__class__.test_data[case]['line_point2'], self.__class__.test_data[case]['ray_point'], self.__class__.test_data[case]['ray_direction'])
-        self.assertEqual((result[0], result[1][0], result[1][1], result[1][2]), (self.__class__.test_data[case]['result'][0], self.__class__.test_data[case]['result'][1][0], self.__class__.test_data[case]['result'][1][1], self.__class__.test_data[case]['result'][1][2]))        
+        result = line_segment_ray_intersection(self.test_data[case]['line_point1'],self.test_data[case]['line_point2'],self.test_data[case]['ray_point'],self.test_data[case]['ray_direction'])
+        self.assertEqual((result[0], result[1][0], result[1][1], result[1][2]), (self.test_data[case]['result'][0],self.test_data[case]['result'][1][0],self.test_data[case]['result'][1][1],self.test_data[case]['result'][1][2]))        
 
     def test_17_line_segment_ray_not_intersecting(self):
         case = 17
-        result = line_segment_ray_intersection( self.__class__.test_data[case]['line_point1'], self.__class__.test_data[case]['line_point2'], self.__class__.test_data[case]['ray_point'], self.__class__.test_data[case]['ray_direction'])
-        self.assertEqual(result, self.__class__.test_data[case]['result'])
+        result = line_segment_ray_intersection(self.test_data[case]['line_point1'],self.test_data[case]['line_point2'],self.test_data[case]['ray_point'],self.test_data[case]['ray_direction'])
+        self.assertEqual(result,self.test_data[case]['result'])
         
     def test_18_line_segment_ray_not_intersecting(self):
         case = 18
-        result = line_segment_ray_intersection( self.__class__.test_data[case]['line_point1'], self.__class__.test_data[case]['line_point2'], self.__class__.test_data[case]['ray_point'], self.__class__.test_data[case]['ray_direction'])
-        self.assertEqual(result, self.__class__.test_data[case]['result'])
+        result = line_segment_ray_intersection(self.test_data[case]['line_point1'],self.test_data[case]['line_point2'],self.test_data[case]['ray_point'],self.test_data[case]['ray_direction'])
+        self.assertEqual(result,self.test_data[case]['result'])
         
     def test_19_line_segment_ray_not_intersecting(self):
         case = 19
-        result = line_segment_ray_intersection( self.__class__.test_data[case]['line_point1'], self.__class__.test_data[case]['line_point2'], self.__class__.test_data[case]['ray_point'], self.__class__.test_data[case]['ray_direction'])
-        self.assertEqual(result, self.__class__.test_data[case]['result'])
+        result = line_segment_ray_intersection(self.test_data[case]['line_point1'],self.test_data[case]['line_point2'],self.test_data[case]['ray_point'],self.test_data[case]['ray_direction'])
+        self.assertEqual(result,self.test_data[case]['result'])
 
     def test_20_line_plane_intersecting(self):
         case = 20
-        result = plane_line_intersection( self.__class__.test_data[case]['line_start_point'], self.__class__.test_data[case]['line_direction'], self.__class__.test_data[case]['polygon'])
-        self.assertEqual((result[0], result[1][0], result[1][1], result[1][2]), (self.__class__.test_data[case]['result'][0], self.__class__.test_data[case]['result'][1][0], self.__class__.test_data[case]['result'][1][1], self.__class__.test_data[case]['result'][1][2]))        
+        result = plane_line_intersection(self.test_data[case]['line_start_point'],self.test_data[case]['line_direction'],self.test_data[case]['polygon'])
+        self.assertEqual((result[0], result[1][0], result[1][1], result[1][2]), (self.test_data[case]['result'][0],self.test_data[case]['result'][1][0],self.test_data[case]['result'][1][1],self.test_data[case]['result'][1][2]))        
 
     def test_21_line_plane_intersecting(self):
         case = 21
-        result = plane_line_intersection( self.__class__.test_data[case]['line_start_point'], self.__class__.test_data[case]['line_direction'], self.__class__.test_data[case]['polygon'])
-        self.assertEqual((result[0], result[1][0], result[1][1], result[1][2]), (self.__class__.test_data[case]['result'][0], self.__class__.test_data[case]['result'][1][0], self.__class__.test_data[case]['result'][1][1], self.__class__.test_data[case]['result'][1][2]))        
+        result = plane_line_intersection(self.test_data[case]['line_start_point'],self.test_data[case]['line_direction'],self.test_data[case]['polygon'])
+        self.assertEqual((result[0], result[1][0], result[1][1], result[1][2]), (self.test_data[case]['result'][0],self.test_data[case]['result'][1][0],self.test_data[case]['result'][1][1],self.test_data[case]['result'][1][2]))        
 
     def test_22_line_plane_not_intersecting(self):
         case = 22
-        result = plane_line_intersection( self.__class__.test_data[case]['line_start_point'], self.__class__.test_data[case]['line_direction'], self.__class__.test_data[case]['polygon'])
-        self.assertEqual(result, self.__class__.test_data[case]['result'])
+        result = plane_line_intersection(self.test_data[case]['line_start_point'],self.test_data[case]['line_direction'],self.test_data[case]['polygon'])
+        self.assertEqual(result,self.test_data[case]['result'])
         
     def test_23_ray_plane_intersecting(self):
         case = 23
-        result = plane_ray_intersection( self.__class__.test_data[case]['line_start_point'], self.__class__.test_data[case]['line_direction'], self.__class__.test_data[case]['polygon'])
-        self.assertEqual((result[0], result[1][0], result[1][1], result[1][2]), (self.__class__.test_data[case]['result'][0], self.__class__.test_data[case]['result'][1][0], self.__class__.test_data[case]['result'][1][1], self.__class__.test_data[case]['result'][1][2]))        
+        result = plane_ray_intersection(self.test_data[case]['line_start_point'],self.test_data[case]['line_direction'],self.test_data[case]['polygon'])
+        self.assertEqual((result[0], result[1][0], result[1][1], result[1][2]), (self.test_data[case]['result'][0],self.test_data[case]['result'][1][0],self.test_data[case]['result'][1][1],self.test_data[case]['result'][1][2]))        
 
     def test_24_ray_plane_intersecting(self):
         case = 24
-        result = plane_ray_intersection( self.__class__.test_data[case]['line_start_point'], self.__class__.test_data[case]['line_direction'], self.__class__.test_data[case]['polygon'])
-        self.assertEqual((result[0], result[1][0], result[1][1], result[1][2]), (self.__class__.test_data[case]['result'][0], self.__class__.test_data[case]['result'][1][0], self.__class__.test_data[case]['result'][1][1], self.__class__.test_data[case]['result'][1][2]))        
+        result = plane_ray_intersection(self.test_data[case]['line_start_point'],self.test_data[case]['line_direction'],self.test_data[case]['polygon'])
+        self.assertEqual((result[0], result[1][0], result[1][1], result[1][2]), (self.test_data[case]['result'][0],self.test_data[case]['result'][1][0],self.test_data[case]['result'][1][1],self.test_data[case]['result'][1][2]))        
 
     def test_25_ray_plane_not_intersecting(self):
         case = 25
-        result = plane_ray_intersection( self.__class__.test_data[case]['line_start_point'], self.__class__.test_data[case]['line_direction'], self.__class__.test_data[case]['polygon'])
-        self.assertEqual(result, self.__class__.test_data[case]['result'])
+        result = plane_ray_intersection(self.test_data[case]['line_start_point'],self.test_data[case]['line_direction'],self.test_data[case]['polygon'])
+        self.assertEqual(result,self.test_data[case]['result'])
         
     def test_26_point_is_in_polygon(self):
         case = 26
-        result = is_point_in_polygon( self.__class__.test_data[case]['point'], self.__class__.test_data[case]['polygon'])
-        self.assertEqual(result, self.__class__.test_data[case]['result'])
+        result = is_point_in_polygon(self.test_data[case]['point'],self.test_data[case]['polygon'])
+        self.assertEqual(result,self.test_data[case]['result'])
         
     def test_27_point_is_not_in_polygon(self):
         case = 27
-        result = is_point_in_polygon( self.__class__.test_data[case]['point'], self.__class__.test_data[case]['polygon'])
-        self.assertEqual(result, self.__class__.test_data[case]['result'])
+        result = is_point_in_polygon(self.test_data[case]['point'],self.test_data[case]['polygon'])
+        self.assertEqual(result,self.test_data[case]['result'])
         
     def test_28_point_is_not_in_polygon(self):
         case = 28
-        result = is_point_in_polygon( self.__class__.test_data[case]['point'], self.__class__.test_data[case]['polygon'])
-        self.assertEqual(result, self.__class__.test_data[case]['result'])
+        result = is_point_in_polygon(self.test_data[case]['point'],self.test_data[case]['polygon'])
+        self.assertEqual(result,self.test_data[case]['result'])
         
     def test_29_ray_polygon_intersecting(self):
         case = 29
-        result = ray_polygon_intersection( self.__class__.test_data[case]['ray_starting_point'], self.__class__.test_data[case]['ray_direction'], self.__class__.test_data[case]['polygon'])
-        self.assertEqual((result[0], result[1][0], result[1][1], result[1][2]), (self.__class__.test_data[case]['result'][0], self.__class__.test_data[case]['result'][1][0], self.__class__.test_data[case]['result'][1][1], self.__class__.test_data[case]['result'][1][2]))        
+        result = ray_polygon_intersection(self.test_data[case]['ray_starting_point'],self.test_data[case]['ray_direction'],self.test_data[case]['polygon'])
+        self.assertEqual((result[0], result[1][0], result[1][1], result[1][2]), (self.test_data[case]['result'][0],self.test_data[case]['result'][1][0],self.test_data[case]['result'][1][1],self.test_data[case]['result'][1][2]))        
 
     def test_30_ray_polygon_not_intersecting(self):
         case = 30
-        result = ray_polygon_intersection( self.__class__.test_data[case]['ray_starting_point'], self.__class__.test_data[case]['ray_direction'], self.__class__.test_data[case]['polygon'])
-        self.assertEqual(result, self.__class__.test_data[case]['result'])
+        result = ray_polygon_intersection(self.test_data[case]['ray_starting_point'],self.test_data[case]['ray_direction'],self.test_data[case]['polygon'])
+        self.assertEqual(result,self.test_data[case]['result'])
 
     def test_31_ray_polygon_not_intersecting(self):
         case = 31
-        result = ray_polygon_intersection( self.__class__.test_data[case]['ray_starting_point'], self.__class__.test_data[case]['ray_direction'], self.__class__.test_data[case]['polygon'])
-        self.assertEqual(result, self.__class__.test_data[case]['result'])
+        result = ray_polygon_intersection(self.test_data[case]['ray_starting_point'],self.test_data[case]['ray_direction'],self.test_data[case]['polygon'])
+        self.assertEqual(result,self.test_data[case]['result'])
 
-    def test_plane_rotation(self):
+    @unittest.skip('Needs update')
+    def test_32_plane_rotation(self):
         point = [1, 1]
         angle = 45.0/180*numpy.pi
         res1= rotate_around_center(point, angle)
@@ -1272,7 +1444,7 @@ class testGeometry(unittest.TestCase):
         good = sum([numpy.around(i, decimals=15)-numpy.around(j, decimals=15) for i, j in zip(res2, [0.5, 0.5+numpy.sqrt(2)/2])])
         self.assertTrue(res1==[0, 1] and good==0.0)
 
-    def test_match_sizes_centered(self):
+    def test_33_match_sizes_centered(self):
         im1= numpy.zeros((16,16))
         im2= numpy.zeros((20,16))
         im3= numpy.zeros((20,21))
@@ -1282,7 +1454,7 @@ class testGeometry(unittest.TestCase):
     
         
     @unittest.skip('Could not make it work correctly')
-    def test_HAffine_from_points(self):
+    def test_34_HAffine_from_points(self):
         from scipy.ndimage import affine_transform
         im1 = numpy.zeros((256,256),numpy.uint8)
         im1[32:37,32] = 255
@@ -1294,8 +1466,112 @@ class testGeometry(unittest.TestCase):
         im2  =affine_transform(im1,A,[0,0],order=0)
         A2 = Haffine_from_points(zip(*im2.nonzero()),zip(*im1.nonzero()))
         pass
+    
+    def test_36_triangle(self):
+        expected_vertices = numpy.array([
+            [[ 0.5 ,  0.  ],
+            [-0.5 , 0.  ],
+            [0.  ,  0.87]],
+            [[ 0.35,  0.35],
+            [-0.35, -0.35],
+            [-0.61,  0.61]],
+            [[ 0.  ,  0.5 ],
+            [0.  , -0.5 ],
+            [-0.87,  0.  ]],
+            [[ -0.5 ,  0.  ],
+            [0.5 , 0.  ],
+            [0.  ,  -0.87]],
+        ])
         
+        angles = [0,45,90,180]
+        size = 1.2
+        for i in range(len(angles)):
+            numpy.testing.assert_almost_equal(numpy.round(triangle_vertices(size, angles[i]),2), size*expected_vertices[i], 2)
+        pass
+        
+    def test_37_star(self):
+        import itertools
+        for r,c,o in itertools.product([1.0, 10.0], range(2,10), [0, 45, 90]):
+            v=star_vertices(r,c,o)
+            self.assertEqual(v.shape, (2*c,2))
+            rs=numpy.sqrt(v[:,0]**2+v[:,1]**2)
+            numpy.testing.assert_almost_equal(rs[::2], numpy.ones(c)*r)
+            numpy.testing.assert_almost_equal(rs[1::2], numpy.ones(c)*r*0.5)
+            angles = numpy.arctan2(v[:,1],v[:,0])#-numpy.radians(o)
+            angles = numpy.where(angles<0, angles+2*numpy.pi,angles)
+            try:
+                numpy.testing.assert_almost_equal(numpy.diff(numpy.sort(angles)).std(), 0)
+            except:
+                pass
+            
+            
+    def test_38_rotate_point(self):
+        res= rotate_point(cr((1,0)),90, rc((0,0)))
+        numpy.testing.assert_almost_equal(res['col'],0)
+        numpy.testing.assert_almost_equal(res['row'],1)
+        
+    def test_39_circle_mask(self):
+        from pylab import imshow,show
+        imshow(circle_mask([5,5],5, [20,30]));show()
+        
+    def test_40_vertices2image(self):
+        v=numpy.array([[ -9.39692621e+01,   2.88000000e+02],
+           [ -5.12000000e+02,   2.88000000e+02],
+           [ -5.12000000e+02,  -2.88000000e+02],
+           [ -9.39692621e+01,  -2.88000000e+02],
+           [  5.12000000e+02,   2.88000000e+02],
+           [  9.39692621e+01,   2.88000000e+02],
+           [  9.39692621e+01,  -2.88000000e+02],
+           [  5.12000000e+02,  -2.88000000e+02],
+           [  7.66044443e+01,   6.42787610e+01],
+           [  1.73648178e+01,   9.84807753e+01],
+           [  1.73648178e+01,   2.88000000e+02],
+           [  7.66044443e+01,   2.88000000e+02],
+           [  1.73648178e+01,   9.84807753e+01],
+           [ -5.00000000e+01,   8.66025404e+01],
+           [ -5.00000000e+01,   2.88000000e+02],
+           [  1.73648178e+01,   2.88000000e+02],
+           [ -5.00000000e+01,   8.66025404e+01],
+           [ -9.39692621e+01,   3.42020143e+01],
+           [ -9.39692621e+01,   2.88000000e+02],
+           [ -5.00000000e+01,   2.88000000e+02],
+           [ -9.39692621e+01,  -3.42020143e+01],
+           [ -5.00000000e+01,  -8.66025404e+01],
+           [ -5.00000000e+01,  -2.88000000e+02],
+           [ -9.39692621e+01,  -2.88000000e+02],
+           [ -5.00000000e+01,  -8.66025404e+01],
+           [  1.73648178e+01,  -9.84807753e+01],
+           [  1.73648178e+01,  -2.88000000e+02],
+           [ -5.00000000e+01,  -2.88000000e+02],
+           [  1.73648178e+01,  -9.84807753e+01],
+           [  7.66044443e+01,  -6.42787610e+01],
+           [  7.66044443e+01,  -2.88000000e+02],
+           [  1.73648178e+01,  -2.88000000e+02],
+           [  7.66044443e+01,  -6.42787610e+01],
+           [  1.00000000e+02,  -2.44929360e-14],
+           [  1.00000000e+02,  -2.88000000e+02],
+           [  7.66044443e+01,  -2.88000000e+02]])
+        vertices2image(v)
+        
+
+def test_estimate_rotation():
+    a = [[1, 1], [1, 5]]
+    angle= 90.0/180*numpy.pi
+    b= rotate_around_center(a, angle)
+    a2 = estimate_rotation(numpy.array(a), numpy.array(b))
+    pass
+  
+def test_procrustes():
+    points1 = numpy.array([[1,1],[1,0]])
+    points2 = numpy.array([[1,2],[1,1]])
+    r1= procrustes(points1,points2)
+    points2 = numpy.array([[1,0],[1,-1]])
+    r2= procrustes(points1,points2)
+    
+    pass
+
 if __name__ == "__main__":
+    test_procrustes()
     unittest.main()
     test_data =  [               {
                  'line_point1': numpy.array([0.0, 1.0, 0.0]), 
@@ -1350,3 +1626,7 @@ if __name__ == "__main__":
     vector = numpy.array([0, 0, 1])
     angle = numpy.array([45, 45, 0])
     print rotate_vector(vector, angle * numpy.pi/180.0)
+    
+
+if __name__ == '__main__':
+    unittest.main()

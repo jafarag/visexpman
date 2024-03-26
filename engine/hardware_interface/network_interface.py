@@ -1,3 +1,4 @@
+#OBSOLETE
 import socket
 import Queue
 import sys
@@ -9,9 +10,10 @@ import os
 import numpy
 try:
     import blosc
+    import zmq
+    import simplejson
 except:
     pass
-import simplejson
 import os.path
 import sys
 import threading
@@ -19,16 +21,18 @@ import SocketServer
 import random
 from visexpman.engine.generic import utils
 from visexpman.engine.generic import log
-from visexpman.engine.generic import file
+from visexpman.engine.generic import fileop
 import traceback
-import visexpman.users.zoltan.test.unit_test_runner as unit_test_runner
-from visexpman.engine.generic.introspect import list_type
 try:
-    import zmq
+    from visexpman.users.test import unittest_aggregator
 except:
     pass
-import simplejson
+from visexpman.engine.generic.introspect import list_type
 import multiprocessing
+try:
+    import psutil
+except:
+    pass
 from multiprocessing import Process, Manager,  Event
 DISPLAY_MESSAGE = False
 
@@ -47,77 +51,101 @@ def zmq_device(in_port, out_port, monitor_port, in_type='PULL', out_type='PUSH',
     device.start()
     time.sleep(.2)
     return device
-        
-class ZeroMQPuller(multiprocessing.Process):#threading.Thread):
-    '''Pulls zmq messages from a server and puts it in a python queue'''
-    def __init__(self, port, queue=None, type='PULL', serializer='json', maxiter=float('Inf')): #type can be zmq.SUB too
-        self.serializer= serializer
-        self.queue = queue
-        self.port=port
-        self.serializer=serializer
-        if queue is None:
-            self.manager= multiprocessing.Manager()
-            self.queue=self.manager.list()
-        self.type=type
-        super(ZeroMQPuller, self).__init__()
-        self.exit = multiprocessing.Event()
-        self.maxiter= maxiter
-        
-    def run(self):
-        self.debug=0
-        try:
-            self.pid1 = os.getpid()
-            self.context = zmq.Context(1)
-            self.client = self.context.socket(getattr(zmq, self.type))
-            if self.type=='SUB':
-                self.client.setsockopt(zmq.SUBSCRIBE, '')
-            self.client.setsockopt(zmq.LINGER, 150)
-            self.client.connect('tcp://localhost:{0}'.format(self.port))
-            self.poll = zmq.Poller()
-            self.poll.register(self.client, zmq.POLLIN)
-            while not self.exit.is_set():
-                socks = dict(self.poll.poll(1000)) #timeout in each second allows stopping process via the close method
-                if self.debug:
-                    self.queue.append(10)
-                if socks.get(self.client) == zmq.POLLIN:
-                    try:
-                        if self.serializer == 'json':
-                            msg = self.client.recv_json()
-                        else:
-                            msg = self.client.recv()
-                        if self.debug:
-                            self.queue.append(msg)
-                        if msg=='TERMINATE': # exit process via network 
-                            self.client.close()
-                            self.context.term()
+
+def ZeroMQPuller( port, queue=None, type='PULL', serializer='json', maxiter=float('Inf'), threaded=False,debug=False): #type can be zmq.SUB too
+    if threaded is True:
+        base = threading.Thread
+    else:
+        base = multiprocessing.Process
+    class ZeroMQPullerClass(base):
+        '''Pulls zmq messages from a server and puts it in a python queue'''
+        def __init__(self, port, queue=None, type='PULL', serializer='json', maxiter=float('Inf'), threaded=False,debug=False): #type can be zmq.SUB too
+            self.serializer= serializer
+            self.queue = queue
+            self.port=port
+            self.serializer=serializer
+            self.threaded = threaded
+            if queue is None:
+                if not threaded:
+                    self.manager= multiprocessing.Manager()
+                    self.queue=self.manager.list()
+                else:
+                    self.queue=[] # list is thread safe for reading only!
+            self.type=type
+            if threaded:
+                threading.Thread.__init__(self)
+                self.exit = threading.Event()
+            else:
+                multiprocessing.Process.__init__(self)
+                self.exit = multiprocessing.Event()
+                self.parentpid = os.getpid() #init is executed in the parent process
+            self.maxiter= maxiter
+            self.debug=debug
+            
+        def run(self):
+            try:
+                self.pid1 = os.getpid()
+                self.context = zmq.Context(1)
+                self.client = self.context.socket(getattr(zmq, self.type))
+                if self.type=='SUB':
+                    self.client.setsockopt(zmq.SUBSCRIBE, '')
+                self.client.setsockopt(zmq.LINGER, 150)
+                self.client.connect('tcp://localhost:{0}'.format(self.port))
+                self.poll = zmq.Poller()
+                self.poll.register(self.client, zmq.POLLIN)
+                while not self.exit.is_set():
+                    if not self.threaded:
+                        # make sure this process terminates when parent is no longer alive
+                        p = psutil.Process(os.getpid())
+                        if p.parent.pid != self.parentpid:
+                            self.close()
                             return
-                    except Exception as e:
-                        msg = str(e)
-                    if hasattr(self.queue, 'put'):
-                        self.queue.put(msg)
-                    elif hasattr(self.queue, 'append'):
-                        self.queue.append(msg)
-        except Exception as e:
-            msg=str(e)
-            if hasattr(self.queue, 'put'):
-                self.queue.put(msg)
-            elif hasattr(self.queue, 'append'):
-                self.queue.append(msg)
-        self.client.close()
-        self.context.term()
+                    socks = dict(self.poll.poll(1000)) #timeout in each second allows stopping process via the close method
+                    if socks.get(self.client) == zmq.POLLIN:
+                        try:
+                            if self.serializer == 'json':
+                                msg = self.client.recv_json()
+                            else:
+                                msg = self.client.recv()
+                            if self.debug and self.threaded:
+                                print 'Poller received message:{0}'.format(msg)
+                            if msg=='TERMINATE': # exit process via network 
+                                self.client.close()
+                                self.context.term()
+                                if hasattr(self.queue, 'put'):
+                                    self.queue.put(msg)
+                                elif hasattr(self.queue, 'append'):
+                                    self.queue.append(msg) #propagate TERMINATE command in case receiver also handles it
+                                return
+                        except Exception as e:
+                            msg = str(e)
+                        if hasattr(self.queue, 'put'):
+                            self.queue.put(msg)
+                        elif hasattr(self.queue, 'append'):
+                            self.queue.append(msg)
+            except Exception as e:
+                msg=str(e)
+                if hasattr(self.queue, 'put'):
+                    self.queue.put(msg)
+                elif hasattr(self.queue, 'append'):
+                    self.queue.append(msg)
+            self.client.close()
+            self.context.term()
+            
+            
+        def close(self): #exit process if spawned on the same machine
+            print "Shutdown initiated"
+            self.debug=1
+            self.exit.set()
         
-        
-    def close(self): #exit process if spawned on the same machine
-        print "Shutdown initiated"
-        self.debug=1
-        self.exit.set()
+        def kill(self):
+            import signal
+            try:
+                os.kill(self.pid1, signal.SIGTERM)
+            except:
+                pass
     
-    def kill(self):
-        import signal
-        try:
-            os.kill(self.pid1, signal.SIGTERM)
-        except:
-            pass
+    return ZeroMQPullerClass(port, queue, type, serializer, maxiter, threaded,debug)
 
 class ZeroMQPusher(object):
     def __init__(self, port=None, type='PUSH', serializer='json'): #can be zmq.PUB too
@@ -154,13 +182,16 @@ class ZeroMQPusher(object):
         self.socket.close()
         self.context.term()
 
-class CallableViaZeroMQ(threading.Thread):
+class CallableViaZeroMQ(threading.Thread, multiprocessing.Process):
     '''Interface to call a method via ZeroMQ socket'''
-    def __init__(self, port):
+    def __init__(self, port, thread=1):
         '''We allow methods be called directly by another thread but you must ensure data is protected by locks. In those cases locks block concurrent access but allow fine grained concurrency
         between direct method calls and calls via ZMQ'''
         self.port = port
-        threading.Thread.__init__(self)
+        if thread:
+            threading.Thread.__init__(self)
+        else:
+            multiprocessing.Process.__init__(self)
         
     def run(self):
         if self.port is None:
@@ -265,6 +296,7 @@ class SockServer(SocketServer.TCPServer):
         self.alive_message = 'SOCechoEOCaliveEOP'
         self.shutdown_requested = False        
         self.keepalive = True#Client can request to stop keep alive check until the next message
+        self.start_time = time.time()
         
     def shutdown_request(self):
         self.shutdown_requested = True
@@ -272,7 +304,7 @@ class SockServer(SocketServer.TCPServer):
     def printl(self, message):        
         debug_message = self.name + ': ' + str(message)
         if DISPLAY_MESSAGE:
-            print debug_message
+            print time.time()-self.start_time, debug_message
         if self.log_queue != None:
             self.log_queue.put([time.time(), debug_message], True)
         
@@ -296,7 +328,10 @@ class SockServer(SocketServer.TCPServer):
                         if now - self.last_alive_message > 0.2 * self.connection_timeout:
                             try:
                                 if self.keepalive:
-                                    request.send(self.alive_message)
+                                    try:
+                                        request.send(self.alive_message)
+                                    except:
+                                        self.printl(traceback.format_exc())
                                     self.last_alive_message = now
                             except:
                                 self.printl(traceback.format_exc())
@@ -370,8 +405,8 @@ class CommandRelayServer(object):
         self.config = config        
         if self.config.COMMAND_RELAY_SERVER['ENABLE']:
             self._generate_queues()
-            self.log = log.LoggerThread(self.command_queue, self.log_queue, 'server log', file.generate_filename(os.path.join(self.config.LOG_PATH, 'server_log.txt')), timestamp = 'no', local_saving = True) 
-            self.log.start()
+#            self.log = log.LoggerThread(self.command_queue, self.log_queue, 'server log', fileop.generate_filename(os.path.join(self.config.LOG_PATH, 'server_log.txt')), timestamp = 'no', local_saving = True) 
+#            self.log.start()
             self._create_servers()
             self._start_servers()
         
@@ -436,7 +471,7 @@ class CommandRelayServer(object):
                 for endpoint, server in connection.items():
                     server.shutdown()
             self.command_queue.put('TERMINATE')
-            self.log.join()
+            #self.log.join()
                 
     def get_debug_info(self, time_format = True):
         debug_info = []
@@ -444,7 +479,7 @@ class CommandRelayServer(object):
             while not self.log_queue.empty():
                 packet = self.log_queue.get()
                 if time_format:
-                    packet = [utils.time_stamp_to_hms(packet[0]), packet[1]]
+                    packet = [utils.timestamp2hms(packet[0]), packet[1]]
                 try:
                     self.log.info(packet)
                 except:
@@ -460,6 +495,7 @@ class CommandRelayServer(object):
         if connection_id != None and endpoint_name != None:
             connection_status = self.servers[connection_id][endpoint_name].server.connected
         return connection_status
+    
 
 class QueuedClient(QtCore.QThread):
     def __init__(self, queue_out, queue_in, server_address, port, timeout, endpoint_name, local_address = ''):
@@ -481,7 +517,7 @@ class QueuedClient(QtCore.QThread):
     def printl(self, message):
         debug_message = str(message)
         if DISPLAY_MESSAGE:
-            print debug_message        
+            print time.time()-self.start_time, debug_message
         self.log_queue.put([time.time(), debug_message], True)
         
     def run(self):   
@@ -491,7 +527,6 @@ class QueuedClient(QtCore.QThread):
         keepalive = True
         while True:
             connection_close_request = False
-            self.printl((self.server_address, self.local_address))
             try:
                 if self.local_address != '':
                      self.connection = socket.create_connection((self.server_address, self.port), source_address = (self.local_address, 0))
@@ -510,7 +545,7 @@ class QueuedClient(QtCore.QThread):
                     connection_close_request = True
                     self.printl(traceback.format_exc())
                 if 'connected' in data:
-                    while True:                    
+                    while True:
                         if not self.queue_out.empty():
                             out = self.queue_out.get()
                             if 'stop_client' in out:
@@ -538,7 +573,7 @@ class QueuedClient(QtCore.QThread):
                                 if sys.exc_info()[0].__name__ == 'timeout':
                                     self.last_receive_timout = time.time()
                                 data = ''
-                            if len(data) > 0:                            
+                            if len(data) > 0:
                                 if self.alive_message in data and keepalive:
                                    #Send back keep alive message
                                     data = data.replace(self.alive_message,'')
@@ -578,11 +613,9 @@ class QueuedClient(QtCore.QThread):
                 time.sleep(1.0 + 1.5 * random.random())
                 self.printl('connection closed')                
                 self.queue_in.put('connection closed')
-            except socket.error:
-                self.printl('socket error: ' + traceback.format_exc())                
             except:
                 self.printl(traceback.format_exc())
-                
+            time.sleep(0.1)
             if shutdown_request:
                 self.printl('stop client')
                 break
@@ -603,14 +636,12 @@ class QueuedClient(QtCore.QThread):
         map(self.queue_in.put, data_back_to_queue)
         return result
             
-    def connected_to_remote_client(self, timeout = 8.0):
+    def connected_to_remote_client(self, timeout = 1.5):
         '''connected_to_remote_client
         Sends an echo message to the remote client and waits for the response. If it does not arrive within the timout provided, it is assumed that the remote client is not connected
         '''
         #TODO: testcase is missing for this function
         import random
-        import traceback
-        map(self.printl, traceback.format_list(traceback.extract_stack()))
         echo_message = 'SOCechoEOC{0}_{1}EOP'.format(self.endpoint_name, int(random.random()*10e5))
         self.queue_out.put(echo_message)
         t = utils.Timeout(timeout)
@@ -626,15 +657,16 @@ def start_client(config, client_name, connection_name, queue_in, queue_out):
     else:
         server_address = config.COMMAND_RELAY_SERVER['RELAY_SERVER_IP']
         local_address = ''
-    client = QueuedClient(queue_out, queue_in, 
-                          server_address, 
-                          config.COMMAND_RELAY_SERVER['CONNECTION_MATRIX'][connection_name][client_name]['PORT'], 
-                          config.COMMAND_RELAY_SERVER['TIMEOUT'], 
-                          client_name,
+    if config.COMMAND_RELAY_SERVER['CONNECTION_MATRIX'].has_key(connection_name):
+        client = QueuedClient(queue_out, queue_in, 
+                              server_address,
+                              config.COMMAND_RELAY_SERVER['CONNECTION_MATRIX'][connection_name][client_name]['PORT'], 
+                              config.COMMAND_RELAY_SERVER['TIMEOUT'], 
+                              client_name,
                           local_address = local_address)
-    if config.COMMAND_RELAY_SERVER['CLIENTS_ENABLE']:
-        client.start()
-    return client
+        if config.COMMAND_RELAY_SERVER['CLIENTS_ENABLE']:
+            client.start()
+        return client
 
 #============= Helpers ====================#
 
@@ -689,7 +721,7 @@ class QueuedServerTestConfig(visexpman.engine.generic.configuration.Config):
             '6_7'  : {'6' : {'IP': 'localhost', 'PORT': self.BASE_PORT+2}, '7' : {'IP': 'localhost', 'PORT': self.BASE_PORT + 3}},
             }
         }
-        LOG_PATH = unit_test_runner.TEST_working_folder
+        LOG_PATH = unittest_aggregator.TEST_working_folder
         self._create_parameters_from_locals(locals())
 
 class TestQueuedServer(unittest.TestCase):
@@ -796,10 +828,11 @@ class NetworkListener(QtCore.QThread):
 
         elif self.socket_type ==  socket.SOCK_DGRAM:
             while True:
+                
                 try:
                     udp_buffer, addr = self.socket.recvfrom(self.udp_buffer_size)
                     self.client_address = addr
-#                    print udp_buffer
+#                    print addr, udp_buffer
                     self.command_queue.put(udp_buffer)
 #                 except socket.timeout:
 #                     pass
@@ -1132,3 +1165,4 @@ if __name__ == "__main__":
     suite = unittest.TestLoader().loadTestsFromTestCase(TestZMQInterface)
     unittest.TextTestRunner().run(suite)
     print 'all done'
+    

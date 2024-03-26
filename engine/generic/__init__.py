@@ -1,29 +1,55 @@
+#TODO: Functions obsolete or has to be reworked
 import numpy
-from PIL import Image
-from PIL import ImageDraw
-from PIL import ImageFont
+try:
+    import Image
+    import ImageDraw
+    import ImageFont
+except ImportError:
+    from PIL import Image
+    from PIL import ImageDraw
+    from PIL import ImageFont
+
 import os
-from visexpA.engine.dataprocessors import generic
+if 0:
+    from visexpA.engine.dataprocessors import generic
 import unittest
 import itertools
     
+#TODO: these functions may go to visexpA/generic
 def pack_to_rgb(array_r, array_g=None, array_b = None):
     if array_g==None and array_b == None:
         return numpy.rollaxis(numpy.array([array_r, array_r, array_r]),  0,  3)
     else:
         return numpy.rollaxis(numpy.array([array_r, array_g, array_b]),  0,  3)
 
-def rescale_numpy_array_image(image, scale):
+def rescale_numpy_array_image(image, scale,  filter = None,  normalize = True):
     if not isinstance(scale,  numpy.ndarray) and not isinstance(scale,  numpy.void):
         scale = utils.cr((scale,  scale))
-    im = Image.fromarray(generic.normalize(image,numpy.uint8))
+    if filter is None:
+        filter = Image.ANTIALIAS
+    if normalize:
+        im = Image.fromarray(generic.normalize(image,numpy.uint8))
+    else:
+        im = Image.fromarray(image)
+        
     new_size = (int(im.size[0] * scale['col']), int(im.size[1] * scale['row']))
-    im = im.resize(new_size, Image.ANTIALIAS)
+    im = im.resize(new_size, filter)
     return numpy.asarray(im)
     
-def vertical_flip_array_image(image):
-    im = Image.fromarray(generic.normalize(image,numpy.uint8))
+def vertical_flip_array_image(image,  normalize = True):
+    if normalize:
+        im = Image.fromarray(generic.normalize(image,numpy.uint8))
+    else:
+        im = Image.fromarray(image)
     im = im.transpose(Image.FLIP_TOP_BOTTOM)
+    return numpy.asarray(im)
+    
+def horizontal_flip_array_image(image,  normalize = True):
+    if normalize:
+        im = Image.fromarray(generic.normalize(image,numpy.uint8))
+    else:
+        im = Image.fromarray(image)
+    im = im.transpose(Image.FLIP_LEFT_RIGHT)
     return numpy.asarray(im)
 
 def draw_line_numpy_array(image, line, fill = (255, 0, 0)):
@@ -47,8 +73,8 @@ def expspace(start,  end,  number_of_points):
     
 def iterate_parameter_space(parameters):
     iterable_parameters = []
-    for parameter_name, parameter_values in parameters.items():
-        iterable_parameters.append(parameter_values)
+    for parameter_name in parameters.keys():
+        iterable_parameters.append(parameters[parameter_name])
     iterable = []
     for item in itertools.product(*iterable_parameters):
         iterable.append(item)
@@ -69,7 +95,7 @@ class Test(unittest.TestCase):
     
 #    def test_01(self):
 #        file = '/home/zoltan/visexp/debug/mouse_regions.hdf5'
-#        from visexpA.engine.datahandlers import hdf5io
+#        import hdf5io
 #        sr = hdf5io.read_item(file,  'scan_regions')
 #        image = [sr[sr.keys()[1]]['brain_surface']]
 #    #    image = {'image': 100*numpy.ones((100, 200),  numpy.uint16), 'origin':utils.rc((0, 0)), 'scale': utils.rc((1, 1))}

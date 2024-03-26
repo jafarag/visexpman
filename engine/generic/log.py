@@ -1,3 +1,4 @@
+import multiprocessing
 import logging
 import datetime
 import time
@@ -6,198 +7,274 @@ import tempfile
 import shutil
 import unittest
 import threading
-from visexpman.users.zoltan.test import unit_test_runner
-from visexpman.engine.generic import utils
-from visexpman.engine.generic import file
+import copy
+try:
+    from visexpman.users.test import unittest_aggregator
+except:
+    pass
+from visexpman.engine.generic import utils,fileop,stringop
 
-class Log(object):
-    def __init__(self, name,  path, write_mode = 'automatic', timestamp = 'date_time', local_saving = False, format_string = '%(message)s'):
-        '''
-        write_mode: 'automatic', 'user controlled' - way of saving data to disk
-        '''
-        self.path = path
-        self.local_saving = local_saving
-        if self.local_saving:
-            self.log_path = os.path.join(tempfile.gettempdir(), os.path.split(path)[1])
-        else:
-            self.log_path = path
+class LoggingError(Exception):
+    '''
+    Logger process related error
+    '''
+    
+def log2str(msg):
+    msg_out = copy.deepcopy(msg)
+    #Experiment config source code is not logged
+    if utils.safe_has_key(msg_out, 'args') and isinstance(msg_out['args'], list):
+        if len(msg_out['args'])>0:
+            if utils.safe_has_key(msg_out['args'][0], 'experiment_config_source_code'):
+                msg_out['args'][0]['experiment_config_source_code'] = 'Not logged'
+            if utils.safe_has_key(msg_out['args'][0], 'stimulus_source_code'):
+                msg_out['args'][0]['stimulus_source_code'] = 'Not logged'
+            #THIS MIGHT BE OBSOLETE
+            for vn in ['xsignal', 'ysignal', 'frame_trigger_signal', 'valid_data_mask', 
+                            'stimulus_flash_trigger_signal', 'one_period_valid_data_mask', 'one_period_x_scanner_signal']:
+                if utils.safe_has_key(msg_out['args'][0], vn):
+                    msg_out['args'][0][vn] = 'Not logged'
+    return str(msg_out)
+    
+class LoggerHelper(object):
+    '''
+    Set of functions for adding log entries.
+    '''
+    def __init__(self, queue=None):
+        if not hasattr(self, 'sources'):
+            self.queue = queue
             
-        self.log = logging.getLogger(name)
-        self.handler = logging.FileHandler(self.log_path)
-        formatter = logging.Formatter(format_string)
-        self.handler.setFormatter(formatter)
-        self.log.addHandler(self.handler)
-        self.log.setLevel(logging.INFO)
-        self.write_mode = write_mode
-        self.timestamp = timestamp
-        self.log_messages = []
-        self.log_dict = {}#Not tested
-        self.start_time = time.time()
-        self.entry_count = 0
+    def info(self, msg, source='default', queue = None):
+        self.add_entry(msg, source, 'INFO', queue)
+    
+    def warning(self, msg, source='default', queue = None):
+        self.add_entry(msg, source, 'WARNING', queue)
         
-    def info(self, message, log_timestamp = True):
-        message = str(message)
-        message_to_log = message
-        if self.timestamp == 'date_time' and log_timestamp:
-            message_to_log = str(datetime.datetime.now()) + '\t' + message
-            key = utils.datetime_string()
-        elif self.timestamp == 'elapsed_time' and log_timestamp:
-            elapsed_time = round(time.time() - self.start_time, 3)
-            message_to_log = str(elapsed_time) + '\t' + message
-            key = elapsed_time
+    def error(self, msg, source='default', queue = None):
+        self.add_entry(msg, source, 'ERROR', queue)
+        
+    def debug(self, msg, source='default', queue = None):
+        self.add_entry(msg, source, 'DEBUG', queue)
+        
+    def add_entry(self, msg, source, loglevel, queue):
+        entry = [time.time(), loglevel, source, msg]
+        if not hasattr(self, 'sources'):
+            q = self.queue
+        elif self.sources.has_key(source):
+            q = self.sources[source]
         else:
-            message_to_log = message
-            key = 'entry_' + str(self.entry_count)
-        if self.write_mode == 'automatic':
-            self.log.info(message_to_log)
-            self.entry_count += 1
-        elif self.write_mode == 'user control':
-            self.log_messages.append(message_to_log)
-            self.log_dict['time_'+str(key).replace('.', 'p')] = message
-            self.entry_count += 1
-            
-    def error(self, message):
-        self.log.error(message)
+            raise LoggingError('{0} logging source was not added to logger'.format(source))
+        if queue is not None:#Message is put to provided queue, this is used for sending log info to remote application's console
+            queue.put(entry[-1])
+        q.put(entry)
         
-    def warning(self, message):
-        self.log.warning(message)
-        
-    def debug(self, message):
-        self.log.debug(message)
 
+class Logger(multiprocessing.Process,LoggerHelper):
+    '''
+    Logger process that receives log entries via queues and saves all to one file.
+    File operations can be suspended to minimize timing jitters in visual stimulation or in other 'real time' activities.
+    
+    Machine config is not passed on purpose. 
+    Passing such items including big dinctionaries increase the runtime of the start() method of the process
+    
+    The process/log channel architecture makes sure that parallel processes can send log messages to the same logfile.
+    Generally logging would be sufficient for this purpose but with logger file write cannot be controlled while stimulation is presented
+    '''
+    def __init__(self, *args, **kwargs):
+        multiprocessing.Process.__init__(self)
+        self.filename = kwargs['filename']
+        self.logpath = os.path.split(self.filename)[0]
+        if kwargs.has_key('remote_logpath'):
+            self.remote_logpath = kwargs['remote_logpath']
+        self.command = multiprocessing.Queue()
+        self.sources = {}
+        self.add_source('default')
+        self.saving2file_enable = True
+        
+    def get_queues(self):
+        return self.sources
+
+    def add_source(self, source_name):
+        if self.sources.has_key(source_name):#If source already added silently do nothing
+            return
+        if self.pid is not None:
+            raise LoggingError('Logger process alread started, {0} source cannot be added'.format(source_name))
+        self.sources[source_name] = multiprocessing.Queue()
+        return self.sources[source_name]
+        
     def flush(self):
-        full_log = ''
-        for item in self.log_messages:
-            full_log += item + '\n'
-        self.log.info(full_log)
-        self.log_messages = []
-        time.sleep(0.1)
-        try:#Sometimes random errors occur at this point
-            self.handler.flush()
+        '''
+        Read source queues and save entries to file
+        '''
+        entries = []
+        timestamps = []
+        for source_name, source in self.sources.items():
+            while not source.empty():
+                entries.append(source.get())
+                timestamps.append(entries[-1][0])
+        if len(timestamps)==0:
+            return
+        #Sort by time
+        timestamps.sort()
+        str2file = ''
+        for timestamp in timestamps:
+            for entry in entries:
+                if entry[0] == timestamp:
+                    str2file += self._entry2text(entry)
+                    entries.remove(entry)
+                    break
+        self.file.write(str2file)
+        try:
+            self.file.flush()#Happens for unknown reason
         except:
-            time.sleep(2.0)
-            try:
-                self.handler.flush()
-            except:
-                print 'Flushing log file was not successful'
+            import traceback
+            print traceback.format_exc()
+                
+    def _entry2text(self, entry):
+        return '{0}.{4} {1}/{2}\t{3}\n'.format(utils.timestamp2ymdhms(entry[0]), entry[1], entry[2], entry[3],int(entry[0]*10)%10)
         
-    def queue(self, queue, name = None):
+    def upload_logfiles(self):
         '''
-        Assuming that each item in the queue is a list or tuple, where the first item is a timestamp
+        Copies log files from LOG_PATH to REMOTE_LOG_PATH
         '''
-        if name != None:
-            self.info(name, log_timestamp = False)
-        for entry in utils.empty_queue(queue):
-            self.info([utils.timestamp2hms(entry[0]), entry[1]], log_timestamp = False)
-            
-    def copy(self):
-        if self.local_saving:
-            shutil.copyfile(self.log_path, self.path)
-            
-class LoggerThread(threading.Thread, Log):
-    def __init__(self, command_queue, log_queue, name,  path, write_mode = 'automatic', timestamp = 'date_time', local_saving = False, format_string = '%(message)s'):
-        Log.__init__(self, name,  path, write_mode, timestamp, local_saving, format_string)
-        threading.Thread.__init__(self)
-        self.command_queue = command_queue
-        self.log_queue = log_queue
+        for fn in fileop.listdir_fullpath(self.logpath):
+            if fileop.is_first_tag(fn, 'log_') and os.path.splitext(fn)[1] == '.txt':
+                target_path = os.path.join(self.remote_logpath, os.path.split(fn)[1])
+                if not os.path.exists(target_path):#Copy file if cannot be found in remote log folder
+                    import shutil
+                    shutil.copyfile(fn, target_path)
+                    shutil.copystat(fn, target_path)
+
+    ########### Commands ###########
+    def terminate(self):
+        self.command.put('terminate')
+        while True:
+            state = not self.command.empty()
+            if state:
+                break
+            time.sleep(0.1)
+        self.join()
         
+    def suspend(self):
+        '''
+        suspends saving to file until resume is not called
+        '''
+        self.command.put('suspend')
+        if 0:
+            self.sources['default'].put([time.time(), 'DEBUG', 'default', 'suspend'])
+        
+    def resume(self):
+        '''
+        Resumes saving log entries to file
+        '''
+        self.command.put('resume')
+        if 0:
+            self.sources['default'].put([time.time(), 'DEBUG', 'default', 'resume'])
+
     def run(self):
+        t0=time.time()
+        while not os.path.exists(os.path.split(self.filename)[0]) and time.time()-t0<30.0:
+            time.sleep(1)
+        self.file = open(self.filename, 'wt')#Create file
         while True:
             time.sleep(0.1)
-            if not self.command_queue.empty():
-                command = self.command_queue.get()
-                if command == 'TERMINATE':
+            if not self.command.empty():
+                command = self.command.get()
+                if command == 'terminate':
+                    self.flush()
                     break
-            else:
-                for entry in utils.empty_queue(self.log_queue):
-                    self.info('{0}: {1}' .format(utils.timestamp2hms(entry[0]), entry[1]), log_timestamp = False)
-        self.copy()
-                 
-                 
+                elif command == 'suspend':
+                    self.saving2file_enable = False
+                elif command == 'resume':
+                    self.saving2file_enable = True
+            if self.saving2file_enable:
+                self.flush()
+        self.flush()#Make sure that all entries in queue are saved
+        self.file.close()
+        if hasattr(self, 'remote_logpath') and os.path.exists(self.remote_logpath):#Do nothing when  remote log path not provided 
+            self.upload_logfiles()
+        self.command.put('terminated')
+        
+def get_logfilename(config):
+    '''
+    filename format: log_<machine config name>_<username>_<user_interface_name>_yy-mm-dd-hhmm.txt
+    '''
+    expected_attributes = ['user', 'user_interface_name', 'LOG_PATH']
+    if not all([hasattr(config, expected_attribute) for expected_attribute in expected_attributes]):
+        from visexpman.engine import MachineConfigError
+        raise MachineConfigError('LOG_PATH, user and user_interface_name shall be an attribute in machine config')
+    while True:
+        filename =  os.path.join(config.LOG_PATH, 'log_{0}_{1}_{2}_{3}.txt'.format(config.__class__.__name__, config.user, config.user_interface_name, utils.datetime_string()))
+        if not os.path.exists(filename):
+            break
+        time.sleep(1.0)
+    return filename
+
 class TestLog(unittest.TestCase):
     def setUp(self):
-        self.path = file.generate_filename(os.path.join(unit_test_runner.TEST_working_folder, 'log_unit_test.txt'))
+        import visexpman.engine.vision_experiment.configuration
+        self.machine_config = utils.fetch_classes('visexpman.users.test', 'GUITestConfig', required_ancestors = visexpman.engine.vision_experiment.configuration.VisionExperimentConfig,direct = False)[0][1](clear_files=True)
+        self.machine_config.user_interface_name='main_ui'
+        self.machine_config.user = 'test'
 
-    def test_01_automatic_saving_with_timestamps(self):
-        while True:
-            if int(time.time()*1000)%1000 < 500:
-                break        
-        reference_date = str(datetime.datetime.now()).split('.')[0]        
-        log = Log(self.path, self.path)
-        log.info('logged1')
-        log.info('logged2')
-        log.handler.flush()
-        log_file_content = file.read_text_file(self.path)
-        self.assertEqual((os.path.exists(self.path), 
-                          log_file_content.find('logged1') != -1, 
-                          log_file_content.find('logged2') != -1, 
-                          log_file_content.find(reference_date) != -1), 
-                          (True, True, True, True))
-                          
-    def test_02_user_controlled_saving_with_timestamps(self):
-        while True:
-            if int(time.time()*1000)%1000 < 500:
-                break        
-        reference_date = str(datetime.datetime.now()).split('.')[0]        
-        log = Log(self.path, self.path, write_mode = 'user control')
-        log.info('logged1')
-        log.info('logged2')        
-        log_file_content_pre_flush = file.read_text_file(self.path)
-        log.flush()
-        log_file_content = file.read_text_file(self.path)
-        self.assertEqual((os.path.exists(self.path), 
-                          log_file_content.find('logged1') != -1, 
-                          log_file_content.find('logged2') != -1, 
-                          log_file_content.find(reference_date) != -1, 
-                          log_file_content_pre_flush), 
-                          (True, True, True, True, ''))
-                          
-    def test_03_automatic_saving_with_elapsed_time(self):
-        while True:
-            if int(time.time()*1000)%1000 < 500:
-                break        
-        reference_date = str(datetime.datetime.now()).split('.')[0]
-        log = Log(self.path, self.path, timestamp = 'elapsed_time')
-        log.info('logged1')
-        log.info('logged2')
-        log.handler.flush()
-        log_file_content = file.read_text_file(self.path)
-        time_stamps = []
-        for line in log_file_content.split('\n'):
-            if len(line) > 0:
-                time_stamps.append(float(line.split('\t')[0])< 1e-2)
-        self.assertEqual((os.path.exists(self.path), 
-                          log_file_content.find('logged1') != -1, 
-                          log_file_content.find('logged2') != -1, 
-                          log_file_content.find(reference_date) == -1, 
-                          time_stamps[0], 
-                          time_stamps[1]), 
-                          (True, True, True, True, True, True))
-                          
-    def test_04_user_controlled_saving_with_elapsed_time(self):
-        while True:
-            if int(time.time()*1000)%1000 < 500:
-                break        
-        reference_date = str(datetime.datetime.now()).split('.')[0]
-        log = Log(self.path, self.path, write_mode = 'user control', timestamp = 'elapsed_time')
-        log.info('logged1')
-        log.info('logged2')
-        log_file_content_pre_flush = file.read_text_file(self.path)
-        log.flush()
-        log_file_content = file.read_text_file(self.path)
-        time_stamps = []
-        for line in log_file_content.split('\n'):
-            if len(line) > 0:
-                time_stamps.append(float(line.split('\t')[0])< 1e-2)
-        self.assertEqual((os.path.exists(self.path), 
-                          log_file_content.find('logged1') != -1, 
-                          log_file_content.find('logged2') != -1, 
-                          log_file_content.find(reference_date) == -1, 
-                          time_stamps[0], 
-                          time_stamps[1], 
-                          log_file_content_pre_flush), 
-                          (True, True, True, True, True, True, ''))
-                          
+    def test_01_create_logger(self):
+        p= Logger(filename=get_logfilename(self.machine_config), remote_logpath = self.machine_config.REMOTE_LOG_PATH)
+        p.add_source('mysource')
+        p.start()
+        p.info('test1', 'mysource')
+        time.sleep(1.5)
+        if not os.path.exists(p.filename):
+            pass
+        filesize1=os.path.getsize(p.filename)
+        p.suspend()
+        p.info('test2')
+        time.sleep(1)
+        filesize2=os.path.getsize(p.filename)
+        self.assertEqual(filesize1, filesize2)#File size not changed, during suspend no new entry flushed to file
+        p.resume()
+        p.warning('test3')
+        time.sleep(1)
+#        p.run()
+        p.terminate()
+        logged_text = fileop.read_text_file(p.filename)
+        filelist  = {}
+        filelist['logfiles'] = fileop.listdir_fullpath(self.machine_config.LOG_PATH)
+        filelist['remotelogfiles'] = fileop.listdir_fullpath(self.machine_config.REMOTE_LOG_PATH)
+        for k, v in filelist.items():
+            filelist[k] = [os.path.split(i)[1] for i in v]
+        self.assertEqual(len(logged_text.split('INFO'))-1, 2)
+        self.assertEqual(len(logged_text.split('WARNING'))-1, 1)
+        self.assertEqual(len(logged_text.split('\n'))-1, 3)
+        self.assertIn('test1', logged_text)
+        self.assertIn('test2', logged_text)
+        self.assertIn('test3', logged_text), 
+        self.assertEqual(filelist['logfiles'], filelist['remotelogfiles'])
+        
+    def test_02_no_remote_logger(self):
+        p= Logger(filename=get_logfilename(self.machine_config))
+        p.add_source('mysource')
+        p.start()
+        p.info('test1', 'mysource')
+        time.sleep(1)
+        p.info('test2')
+        time.sleep(1)
+        p.warning('test3')
+        p.info('test4')
+        time.sleep(1)
+        p.terminate()
+        logged_text = fileop.read_text_file(p.filename)
+        filelist  = {}
+        filelist['logfiles'] = fileop.listdir_fullpath(self.machine_config.LOG_PATH)
+        for k, v in filelist.items():
+            filelist[k] = [os.path.split(i)[1] for i in v]
+        self.assertEqual(len(logged_text.split('INFO'))-1, 3)
+        self.assertEqual(len(logged_text.split('WARNING'))-1, 1)
+        self.assertEqual(len(logged_text.split('\n'))-1, 4)
+        self.assertIn('test1', logged_text)
+        self.assertIn('test2', logged_text)
+        self.assertIn('test3', logged_text)
+        self.assertIn('test4', logged_text)
+
+        
     def tearDown(self):
         pass
         

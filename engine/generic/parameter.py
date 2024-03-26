@@ -2,17 +2,17 @@ import os.path
 import numpy
 import unittest
 import os
-import visexpman.users.zoltan.test.unit_test_runner as unit_test_runner
+try:
+    from visexpman.users.test import unittest_aggregator
+except:
+    pass
 
 class InvalidParameterValue(Exception):
     pass
     
 class OutOfRangeParameterValue(Exception):
-    pass
+    pass  
     
-class InvalidParameterRange(Exception):
-    pass
-
 class Parameter(object):
     '''
     Parameter class determines the type of parameter automatically. Then performs range check or other checks when it is applicable.
@@ -50,20 +50,18 @@ class Parameter(object):
     - set
     '''
     
-    def __init__(self,  value,  range_ = None,  is_path = False, is_file=False):
+    def __init__(self,  value,  range_ = None,  is_path = False, is_file=False,check_range = True, name = ''):
+        self.name = name
         self.v = None
         self.range_ = range_
         self._detect_type(value, range_ = range_,  is_path = is_path,  is_file=is_file)
-        self._check_parameter_range(range_)
+        if check_range:
+            self._check_parameter_range(range_)
         self.value = self.v #alias for value attribute
 
     def _detect_type(self,  value, range_ = None,  is_path = False,  is_file=False):
         '''
         Determine type of value based on the value itself, the range and the path switch.
-        The following exceptions are thrown:
-        InvalidParameterRange: invalid parameter range is provided
-        OutOfRangeParameterValue: value is not within the range
-        InvalidParameterValue : value is not valid
         '''
         exceptionType = None
         if isinstance(value,  list):
@@ -108,53 +106,54 @@ class Parameter(object):
                 self._type = 'enumerated'
         
         if exceptionType != None:
-            raise exceptionType(value)
+            raise exceptionType((value,self.name))
         else:
             self.v = value
             
     def _check_parameter_range(self,  range_):
-        exceptionType = None        
+        exceptionType = None
         if self._type == 'path':
             if not os.path.exists(self.v):
                 raise IOError('Path '+self.v+' does not exist')
             elif range_ != None:
-                raise InvalidParameterRange
+                raise RuntimeError('Invalid parameter range: {0}, value: {1}, name: {2}'.format(range_, self.v, self.name))
         elif self._type == 'file':
             if not os.path.isfile(self.v):
                 raise IOError('Path to file '+self.v+' does not exist')
             elif range_ != None:
-                raise InvalidParameterRange
+                raise RuntimeError('Invalid parameter range: {0}, value: {1}, name: {2}'.format(range_, self.v, self.name))
         elif self._type == 'dict':
             if range_ != None:
-                raise InvalidParameterRange
+                raise RuntimeError('Invalid parameter range: {0}, value: {1}, name: {2}'.format(range_, self.v, self.name))
         elif self._type == 'string':
             if range_ != None:
-                raise InvalidParameterRange
+                raise RuntimeError('Invalid parameter range: {0}, value: {1}, name: {2}'.format(range_, self.v, self.name))
         elif self._type == 'array':            
             if range_ != None:
-                raise InvalidParameterRange
+                raise RuntimeError('Invalid parameter range: {0}, value: {1}, name: {2}'.format(range_, self.v, self.name))
         elif self._type == 'switch':
             if range_ != None:
-                raise InvalidParameterRange
+                raise RuntimeError('Invalid parameter range: {0}, value: {1}, name: {2}'.format(range_, self.v, self.name))
         elif self._type == 'enumerated':
             in_range = False
             if not self.v in range_:
+                print self.v
                 raise OutOfRangeParameterValue
         elif self._type == 'numeric':            
-            if range_ == None:                
-                raise InvalidParameterRange
+            if range_ == None:
+                raise RuntimeError('Invalid parameter range: {0}, value: {1}, name: {2}'.format(range_, self.v,self.name))
             elif len(range_) != 2:                
-                raise InvalidParameterRange
+                raise RuntimeError('Invalid parameter range: {0}, value: {1}, name: {2}'.format(range_, self.v, self.name))
             elif not ((isinstance(range_[0],  int) or isinstance(range_[0],  float)) and (isinstance(range_[1],  int) or isinstance(range_[1],  float))) and (isinstance(self.v,  int) or isinstance(self.v,  float)):
                 if not isinstance(self.v,  list):
-                    raise InvalidParameterRange
+                    raise RuntimeError('Invalid parameter range: {0}, value: {1}, name: {2}'.format(range_, self.v, self.name))
             elif isinstance(self.v,  list):                
                 if len(range_[0]) != len(self.v) or len(range_[1]) != len(self.v):
-                    raise InvalidParameterRange
+                    raise RuntimeError('Invalid parameter range: {0}, value: {1}, name: {2}'.format(range_, self.v, self.name))
                 for range_item in range_:
                     for range_item_item in range_item:
                         if (not isinstance(range_item_item,  int)) and (not isinstance(range_item_item,  float)):
-                            raise InvalidParameterRange                            
+                            raise RuntimeError('Invalid parameter range: {0}, value: {1}, name: {2}'.format(range_, self.v, self.name))
                 for item in self.v:
                     if (not isinstance(range_item_item,  int)) and (not isinstance(range_item_item,  float)):
                         raise InvalidParameterValue
@@ -164,9 +163,9 @@ class Parameter(object):
                         raise OutOfRangeParameterValue
             else:
                 if not(range_[0] <= self.v and range_[1] >= self.v):
-                    raise OutOfRangeParameterValue
+                    raise OutOfRangeParameterValue('range {0}, value: {1}, name: {2}'.format(range_, self.v, self.name))
         else:
-            raise InvalidParameterRange
+            raise RuntimeError('Invalid parameter range: {0}, value: {1}, name: {2}'.format(range_, self.v, self.name))
                 
 
     def set(self,  new_value):
@@ -201,12 +200,14 @@ class testParameter(unittest.TestCase):
         value = '/home/unknown_user'
         self.assertRaises(IOError,  Parameter,  value,  is_path = True)
         
-    def test_03_valid_file_parameter(self):     
-        p = Parameter(unit_test_runner.TEST_valid_file,  is_file = True)
-        self.assertEqual((p._type,  p.v),  ('file', unit_test_runner.TEST_valid_file))
+    def test_03_valid_file_parameter(self):
+        if unittest_aggregator.TEST_valid_file==None:
+            raise IOError('TEST_valid_file parameter incorrect')
+        p = Parameter(unittest_aggregator.TEST_valid_file,  is_file = True)
+        self.assertEqual((p._type,  p.v),  ('file', unittest_aggregator.TEST_valid_file))
         
     def test_04_invalid_file_parameter(self):
-        self.assertRaises(IOError,  Parameter, unit_test_runner.TEST_invalid_file,  is_file = True)
+        self.assertRaises(IOError,  Parameter, unittest_aggregator.TEST_invalid_file,  is_file = True)
         
     def test_05_invalid_file_parameter(self):
         value = '/home/test.txt'
@@ -220,7 +221,7 @@ class testParameter(unittest.TestCase):
     def test_07_string_parameter_with_range(self):
         value = 'some text'
         range_ = [1, 20]
-        self.assertRaises(InvalidParameterRange,  Parameter,  value,  range_ = range_)
+        self.assertRaises(RuntimeError,  Parameter,  value,  range_ = range_)
         
     def test_08_valid_switch_parameter(self):
         value = True
@@ -230,7 +231,7 @@ class testParameter(unittest.TestCase):
     def test_09_invalid_switch_parameter(self):
         value = True
         range_ = [1, 2]        
-        self.assertRaises(InvalidParameterRange,  Parameter,  value,  range_ = range_)        
+        self.assertRaises(RuntimeError,  Parameter,  value,  range_ = range_)        
         
     def test_10_valid_enumerated_parameter(self):
         value = 'a'
@@ -246,7 +247,7 @@ class testParameter(unittest.TestCase):
     def test_12_enumerated_parameter_invalid_range(self):        
         value = 'x'
         range_ = 'a'        
-        self.assertRaises(InvalidParameterRange,  Parameter,  value,  range_ = range_)        
+        self.assertRaises(RuntimeError,  Parameter,  value,  range_ = range_)        
         
     def test_13_valid_numeric_parameter(self):
         value = 1
@@ -261,7 +262,7 @@ class testParameter(unittest.TestCase):
 
     def test_15_numeric_parameter_invalid_range_1(self):
         value = 10.0        
-        self.assertRaises(InvalidParameterRange,  Parameter,  value)
+        self.assertRaises(RuntimeError,  Parameter,  value)
         
     def test_16_numeric_parameter_invalid_range_1(self):
         value = 10.0
@@ -272,7 +273,7 @@ class testParameter(unittest.TestCase):
     def test_17_numeric_parameter_invalid_range_2(self):
         value = 1.0
         range_ = ['a',  10.0]
-        self.assertRaises(InvalidParameterRange,  Parameter,  value,  range_ = range_)
+        self.assertRaises(RuntimeError,  Parameter,  value,  range_ = range_)
     
     def test_18_numeric_parameter_invalid_range_3(self):
         value = 1.0
@@ -287,7 +288,7 @@ class testParameter(unittest.TestCase):
     def test_20_invalid_numeric_parameter_2(self):
         value = 'a'
         range_ = [0.0,  10.0]
-        self.assertRaises(InvalidParameterRange,  Parameter,  value,  range_ = range_)
+        self.assertRaises(RuntimeError,  Parameter,  value,  range_ = range_)
         
     def test_21_numeric_list_parameter(self):
         value = [1, 2, 3]
@@ -298,17 +299,17 @@ class testParameter(unittest.TestCase):
     def test_22_numeric_list_parameter_invalid_range1(self):
         value = [1, 2, 3]
         range_ = [[0, 0],  [10, 10, 10]]        
-        self.assertRaises(InvalidParameterRange,  Parameter,  value,  range_ = range_)
+        self.assertRaises(RuntimeError,  Parameter,  value,  range_ = range_)
         
     def test_23_numeric_list_parameter_invalid_range2(self):
         value = [1, 2, 3]
         range_ = [[0, 0,  'a'],  [10, 10, 10]]
-        self.assertRaises(InvalidParameterRange,  Parameter,  value,  range_ = range_)
+        self.assertRaises(RuntimeError,  Parameter,  value,  range_ = range_)
         
     def test_24_invalid_numeric_list_parameter_1(self):
         value = [1, 2]
         range_ = [[0, 0,  0],  [10, 10, 10]]
-        self.assertRaises(InvalidParameterRange,  Parameter,  value,  range_ = range_)
+        self.assertRaises(RuntimeError,  Parameter,  value,  range_ = range_)
         
     def test_25_invalid_numeric_list_parameter_2(self):
         value = [1, 2,  'a']
@@ -328,7 +329,7 @@ class testParameter(unittest.TestCase):
     def test_28_string_list_parameter_with_range(self):
         value = ['value1', 'value2', 'value3']        
         range_ = [1, 2, 3]
-        self.assertRaises(InvalidParameterRange,  Parameter,  value,  range_ = range_)
+        self.assertRaises(RuntimeError, Parameter,  value,  range_ = range_)
         
     def test_29_dict_parameter(self):
         value = {'a': 1,  'b':2}        
@@ -338,7 +339,7 @@ class testParameter(unittest.TestCase):
     def test_30_invalid_dict_parameter(self):
         value = {'a': 1,  'b':2}
         range_ = [1, 2]
-        self.assertRaises(InvalidParameterRange,  Parameter,  value,  range_ = range_)        
+        self.assertRaises(RuntimeError,  Parameter,  value,  range_ = range_)        
         
     def test_31_list_of_dict_parameter(self):
         value = [{'a': 1,  'b':2},  {'c': 1,  'b':3}]
@@ -353,7 +354,7 @@ class testParameter(unittest.TestCase):
     def test_33_array_parameter_with_range(self):
         value = numpy.array([1, 2, 3])
         range_ = [1, 2]        
-        self.assertRaises(InvalidParameterRange,  Parameter,  value,  range_ = range_)        
+        self.assertRaises(RuntimeError,  Parameter,  value,  range_ = range_)        
 
     #test set method    
     def test_34_set_valid_value(self):
@@ -378,7 +379,7 @@ class testParameter(unittest.TestCase):
         value = [1, 2]
         new_value = 1
         p = Parameter(value,  [[0, 0],  [5, 5]])
-        self.assertRaises(InvalidParameterRange,  p.set,  new_value) 
+        self.assertRaises(RuntimeError,  p.set,  new_value) 
         
     def test_38_set_valid_value(self):
         if os.name == 'nt':

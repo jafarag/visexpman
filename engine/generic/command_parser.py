@@ -1,10 +1,132 @@
-import traceback
-import Queue
-import re
-import unittest
+import traceback, Queue, re, unittest, time, multiprocessing
+from visexpman.engine.generic import utils, introspect
+from visexpman.engine.hardware_interface import queued_socket
 method_extract = re.compile('SOC(.+)EOC') # a command is a string starting with SOC and terminated with EOC (End Of Command)
 parameter_extract = re.compile('EOC(.+)EOP') # an optional parameter string follows EOC terminated by EOP. In case of binary data EOC and EOP should be escaped.
 
+class ServerLoop(queued_socket.QueuedSocketHelpers):
+    '''
+    Overtakes CommandParser class.
+    Checks for function calls coming from a queued socket. Corresponding functions are called.
+    '''
+    def __init__(self, machine_config, socket_queues, command, log = None):
+        queued_socket.QueuedSocketHelpers.__init__(self, socket_queues)
+        self.machine_config = machine_config
+        self.config = machine_config
+        self.command = command
+        self.log = log
+        self.log_source_name = self.machine_config.user_interface_name
+        if hasattr(self.log, 'add_source'):
+            self.log.add_source(self.log_source_name)
+        self.exit=False
+        self.abort=False
+            
+    def printl(self, message, loglevel='info', stdio = True):
+        '''
+        Message to logfile, queued socket and standard output
+        '''
+        utils.printl(self, message, loglevel, stdio)
+        
+    def fetch_next_call(self):
+        '''
+        Checks for incoming data from socket and if data contains valid data, corresponding function is called
+        '''
+        if introspect.is_test_running:
+            time.sleep(0.1)
+        message = self.recv()
+        if not utils.safe_has_key(message, 'function'):
+            return False
+        if not hasattr(self, message['function']):
+            return False
+        
+        args = message.get('args', [])
+        kwargs = message.get('kwargs', {})
+        try:
+            getattr(self, message['function'])(*args, **kwargs)
+            return True
+        except:
+            import traceback
+            self.printl(traceback.format_exc(), 'error')
+            
+    def terminate(self):
+        self.command.put('terminate')
+        
+    def application_callback(self):
+        '''
+        Application specific periodic function calls come here
+        '''
+        
+    def at_process_end(self):
+        '''
+        Called at end of process
+        '''
+            
+    def run(self,timeout = None):
+        t0 = time.time()
+        while True:
+            try:
+                self.fetch_next_call()
+                if not self.command.empty() and self.command.get() == 'terminate':
+                    break
+                if timeout is not None and timeout < time.time()-t0:
+                    break
+                if self.application_callback() == 'terminate':
+                    break
+                time.sleep(0.05)#This delay might influence the performance of live scanning
+            except:
+                self.printl(traceback.format_exc())
+        self.at_process_end()
+        print 'Server loop ends'#TMP
+#        self.command.put('terminated')
+        
+    def exit_application(self):
+        self.exit=True
+        
+    def stop_all(self):
+        self.abort=True
+        
+    def set_variable(self,varname, value):
+        if not hasattr(self, varname):
+            self.send('{0} variable does not exists'.format(varname))
+        else:
+            setattr(self, varname, value)
+            
+class ProcessLoop(multiprocessing.Process):
+    '''
+    a process with queue interface
+    '''
+    def __init__(self, twait = 10e-3, command = None, response = None, log = None):
+        self.log=log
+        multiprocessing.Process.__init__(self)
+        self.command = multiprocessing.Queue() if command is None else command
+        self.response = multiprocessing.Queue() if response is None else response
+        self.twait=twait
+        
+    def run(self):
+        while True:
+            try:
+                if not self.command.empty():
+                    self.cmd=self.command.get()
+                    if self.cmd=='terminate':
+                        break
+                if self.callback() == 'terminate':
+                    break
+                if hasattr(self, 'cmd'):
+                    del self.cmd
+                time.sleep(self.twait)
+            except:
+                import traceback
+                if hasattr(self.log, 'error'):
+                    self.log.error(traceback.format_exc())
+        if hasattr(self.log, 'info'):
+            self.log.info('{0} terminated'.format(self.__class__.__name__))
+            
+    def callback(self):
+        '''
+        Subclass should overdefine this function
+        '''
+
+#OBSOLETE
 class CommandParser(object):
     '''
     generic class that parses the content of incoming queue(s) and calls the corresponding functions
@@ -22,7 +144,7 @@ class CommandParser(object):
         self.function_call_list = []
         self.failsafe = failsafe
     
-    def parse(self, one=False):
+    def parse(self):
         display_message  = ''
         #gather messages from queues and parse them to function call format
         for queue in self.queue_in:
@@ -31,6 +153,11 @@ class CommandParser(object):
                 display_message += '\n' + message
                 method = method_extract.findall(message)
                 arguments = parameter_extract.findall(message.replace('\n',  '<newline>'))
+                if len(method) == 0 and len(arguments) == 0:#support function,parameter1,parameter2 format
+                    method = [message.split(',')[0]]
+                    arguments = ','.join(message.split(',')[1:])
+                    if arguments != '':
+                        arguments = [arguments]
                 if len(method) > 0:
                     function_call = {'method' : method[0] }
                     if len(arguments) > 0:
@@ -50,10 +177,6 @@ class CommandParser(object):
                     function_call['arguments'] = non_keyword_arguments
                     function_call['keyword_arguments'] = keyword_arguments
                     self.function_call_list.append(function_call)
-                if len(self.function_call_list) == 1 and one:
-                    break
-            if len(self.function_call_list) == 1 and one:
-                break
         #call functions
         self.function_call_results = []
         for function in self.function_call_list:
@@ -70,6 +193,8 @@ class CommandParser(object):
                     self.function_call_results.append(getattr(self, function['method'])(*function['arguments'], **function['keyword_arguments']))
                 if hasattr(self.log, 'info'):
                     self.log.info(function)
+            else:
+                print function
         self.function_call_list = []
         if len(self.function_call_results) > 0:            
             return self.function_call_results
@@ -141,7 +266,8 @@ class TestCommandHandler(unittest.TestCase):
         self.assertEqual((cp.par1, cp.par2, cp.function_call_results[0]), ('1', '2', 'kw'))
         
     def test_06_function_expects_keywords(self):
-        self.queue_in.put('SOCtest_keywordEOC1EOP')
+#        self.queue_in.put('SOCtest_keywordEOC1EOP')
+        self.queue_in.put('test_keyword,1')
         cp = TestCommandParser(self.queue_in, self.queue_out)
         cp.parse()
         self.assertEqual((cp.par1, cp.par2, cp.function_call_results[0]), ('1', 3, 'kw'))

@@ -1,15 +1,9 @@
-import sys
-import os.path
-import os 
-
-import parameter
-
-import unittest
+import os, platform, copy, utils, parameter, unittest
 
 PRINT_PAR_NAMES = False
 
 class Config(object):
-    def __init__(self, machine_config=None, generic_parameters = True):
+    def __init__(self, machine_config=None, generic_parameters = True, ignore_range = False):
         '''
         Machine config: main, setup/user etc specific config that may be used by experiment configs
         
@@ -44,7 +38,8 @@ class Config(object):
             PAR = 
             self._create_parameters_from_locals(locals())
         '''
-        self.machine_config = machine_config
+        self.machine_config = machine_config#OBSOLETE?
+        self.ignore_range = ignore_range
         if generic_parameters:
             self._create_generic_parameters()
         #The _create_application_parameters and the _calculate_parameters methods will be overdefined in the application child class.
@@ -58,49 +53,46 @@ class Config(object):
         self._create_parameter_aliases()
 
     def _create_generic_parameters(self):
-        self.PACKAGE_PATH_p = parameter.Parameter(os.path.split(os.path.split(os.path.dirname(parameter.__file__))[0])[0], is_path=True)                
-        OS = 'unknown'
-        if os.name == 'nt':
-            OS = 'win'
-        elif os.name == 'posix':
-            OS = 'linux'
-        elif hasattr(os,  'uname'):            
-            if os.uname()[0] != 'Linux':
-                OS = 'osx'                
+        self.PACKAGE_PATH_p = parameter.Parameter(os.path.split(os.path.split(os.path.dirname(parameter.__file__))[0])[0], is_path=True)
+        OS = platform.system()
+        IS64BIT = '64' in platform.machine()
         self.OS_p = parameter.Parameter(OS)
+        self.IS64BIT_p = parameter.Parameter(IS64BIT)
         self._create_parameter_aliases()
         return
 
-    def _create_parameters_from_locals(self,  locals):
-        for k,  v in locals.items():
+    def _create_parameters_from_locals(self, locals, check_path = True):
+        for k, v in locals.items():
             if hasattr(self, k):  # parameter was already initialized, just update with new value
                 self.set(k, v)
-            elif k.isupper() and k.find('_RANGE') == -1:
+            elif k.isupper() and '_RANGE' not in k:
                 if PRINT_PAR_NAMES:
                     print k, v
-                if isinstance(v,  list):
+                if self.ignore_range:
+                    setattr(self, k + '_p',  parameter.Parameter(v,  check_range = False,name=k))
+                elif isinstance(v,  list):
                     if len(v)==2 and ((isinstance(v[1], (list, tuple)) and v[1][0] !='not_range') or v[1]==None):
-                        setattr(self,  k + '_p',  parameter.Parameter(v[0],  range_ = v[1]))
+                        setattr(self,  k + '_p',  parameter.Parameter(v[0],  range_ = v[1],name=k))
                     elif len(v) == 1: #when no range is provided (list of strings or dictionaries) # why we do this???
                         setattr(self,  k + '_p',  parameter.Parameter(v))
                     elif len(v)==2 and isinstance(v[1], (list, tuple)) and v[1][0] =='not_range':
                         # in theory such data would not be used as data
                         # for the rare case when parameter is a two element list, seond element is a 4 element list with first element 'not_range', meaning that second element is also data and should be treated as data
                         v[1] = v[1][1:] # remove helper string
-                        setattr(self,  k + '_p',  parameter.Parameter(v))
+                        setattr(self,  k + '_p',  parameter.Parameter(v,name=k))
                     else:
-                        setattr(self,  k + '_p',  parameter.Parameter(v))                        
-                elif k.find('_PATH') != -1: #"PATH" is encoded into variable name
-                    setattr(self,  k + '_p',  parameter.Parameter(v,  is_path = True))
-                elif k.find('_FILE') != -1: #variable name ends with _FILE
-                    setattr(self,  k + '_p',  parameter.Parameter(v,  is_file = True))
+                        setattr(self,  k + '_p',  parameter.Parameter(v,name=k))                        
+                elif '_PATH' in k: #"PATH" is encoded into variable name
+                    setattr(self,  k + '_p',  parameter.Parameter(v, is_path = check_path,name=k))
+                elif '_FILE' in k: #variable name ends with _FILE
+                    setattr(self,  k + '_p',  parameter.Parameter(v, is_file = check_path,name=k))
                 else:
-                    setattr(self,  k + '_p', parameter.Parameter(v))
+                    setattr(self,  k + '_p', parameter.Parameter(v,name=k))
         self._create_parameter_aliases()
 
     def _set_parameters_from_locals(self,  locals):
         for k,  v in locals.items():
-            if k.isupper() and k.find('_RANGE') == -1:
+            if k.isupper() and '_RANGE' not in k:
                 self.set(k,  v)
                 
     def _create_application_parameters(self):
@@ -164,7 +156,7 @@ class Config(object):
         parameter_names = [class_variable for class_variable in class_variables if class_variable.isupper() or 'user' == class_variable]        
         all_parameters = {}
         for parameter_name in parameter_names:
-            all_parameters[parameter_name] = getattr(self,  parameter_name)
+            all_parameters[parameter_name] = getattr(self, parameter_name)
             if hasattr(all_parameters[parameter_name], 'keys'):
                 if all_parameters[parameter_name] == {}:
                     all_parameters[parameter_name] = 0
@@ -174,11 +166,26 @@ class Config(object):
             elif isinstance(getattr(self,  parameter_name), list):
                 if isinstance(getattr(self,  parameter_name)[0], dict):
                     d = {}
-                    for i in range(len(getattr(self,  parameter_name))):
-                        parameter_value = getattr(self,  parameter_name)[i]
+                    for i in range(len(getattr(self, parameter_name))):
+                        parameter_value = getattr(self, parameter_name)[i]
                         d['index_'+str(i)] = parameter_value
                     all_parameters[parameter_name] = d
         return all_parameters
+        
+    def todict(self):
+        packed2dict = {}
+        for parameter_name in [class_variable for class_variable in dir(self) if class_variable.isupper() or 'user' == class_variable]:
+            packed2dict[parameter_name] = getattr(self,parameter_name)
+        return packed2dict
+        
+    def serialize(self):
+        config_modified = copy.copy(self)
+        removable_attributes = ['machine_config', 'runnable', 'pre_runnable', 'queues', 'GAMMA_CORRECTION']
+        for a in removable_attributes:
+            setattr(config_modified, a, 0)
+        return utils.object2array(config_modified)
+        
+### Classes for test purposes ###
         
 class ApplicationTestClass(Config):
     def _create_application_parameters(self):

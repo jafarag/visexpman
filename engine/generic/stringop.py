@@ -4,16 +4,24 @@ import numpy
 import os
 import unittest
 
-def latex_float(f, only_exponent=False):
-    '''Converts a python float into latex string, e.g. 0.001 -> 10^-3'''
-    float_str = "{0:.2g}".format(f)
-    if "e" in float_str:
-        base, exponent = float_str.split("e")
-        if only_exponent:
-            return r"10^{{{0}}}".format(int(exponent))
-        return r"{0} \times 10^{{{1}}}".format(base, int(exponent))
-    else:
-        return float_str
+def str2params(par_str):
+    '''
+    String containing comma separated numbers is converted to a list if floats
+    '''
+    try:
+        return map(float, str(par_str).split(','))
+    except ValueError:
+        return []
+
+def long_substr(data):
+    '''extracts longest common substring from a list of strings'''
+    substr = ''
+    if len(data) > 1 and len(data[0]) > 0:
+        for i in range(len(data[0])):
+            for j in range(len(data[0])-i+1):
+                if j > len(substr) and all(data[0][i:i+j] in x for x in data):
+                    substr = data[0][i:i+j]
+    return substr
 
 def extract_common_string(flist, to_remove=['\)-r\d-']):
     ''' Locates '-rx-' part in filenames (where -rx- mean repetition x) and tries to find filenames that differ
@@ -40,51 +48,7 @@ def split(dotted_path):
     slashed = dotted_path.replace('.', '/')
     path, name = os.path.split(slashed)
     return path.replace('/', '.'),  name
-    
-def dirListing(directory='~', ext = '', prepend='', dflag = False, sort = False,  noext=False):
-    """Returns a list of directories. Set 'prepend' to the same as 'directory'
-    to get results relative to 'directory'. Set 'prepend' to another base path
-    to get results relative to that base path. If the subdirectories under
-    'prepend' do not exist, they will be created.
-    Set dflag=True if you only want directories be searched or returned. Otherwise only files will be returned.
-    Set noext=True if you want the file extensions cut (anything after the last dot)"""
-                #variables
-    dirs = [] #list of directories
-                #list of directories and files
-    lastmod = []
-    if ext=='' and sort == True:
-        raise ValueError("Recursive listing with sorting is not implemented")
 
-    if isinstance(ext,basestring):
-        ext = [ext]
-    ext = [ex[ex.find('.')+1:] for ex in ext] #remove . from extension if it is there
-    try:
-        listing = os.listdir(directory)
-    except OSError:
-        return ''
-    if len(prepend)>0 and prepend[-1] != os.sep:
-        prepend = prepend + os.sep
-                #get just the directories
-    for x in listing:
-        cext = next((ex for ex in ext if re.search(ex+'$',x) is not None), None)
-        id = (os.path.isdir(directory+os.sep+x))
-        if id and (dflag == True or len(ext)==0):# just include the subdirectory in the result list
-            dirs.append(prepend+x)
-            lastmod.append(os.stat(os.path.join(directory,x))[8])
-        elif not id and cext is not None and len(cext) > 0 and not x[0] == '.':# and not id: # add matching files, exclude hidden files whose name starts with .
-            dirs.append(prepend+x)
-            lastmod.append(os.stat(os.path.join(directory,x))[8])
-        elif id or cext is None: # recursive call to look in subdirectories if dirname does not contain the extension
-            rdirs = dirListing(directory+os.sep+x, ext, prepend+x, dflag)
-            if not os.path.exists(prepend+x): # create directory
-                os.makedirs((prepend+x))
-            dirs.extend(rdirs[:])
-    if sort:
-        from operator import itemgetter
-        dirs, modtimes = zip(*sorted(zip(dirs,lastmod), key=itemgetter(1)))
-    if noext: # remove extensions
-        dirs = [item[:item.rfind('.')] for item in dirs]
-    return dirs
 
 def array2string(inarray):
     if inarray.ndim == 2:
@@ -126,6 +90,23 @@ def get_recent_file(flist, ref_date = None, mode = 'earlier', interval=numpy.Inf
     elif len(lm)==1: 
         lm=lm[0]
     return numpy.array(flist)[lm], numpy.array(lastmod_date)[lm]
+    
+def to_variable_name(s):
+    return s.lower().replace(' ', '_')
+    
+def to_title(s):
+    return s.replace('_', ' ').title()
+    
+def string_in_list(list_of_string, keyword, return_match=False, any_match = False):
+    '''
+    Checks if keyword is in any items of list
+    '''
+    if return_match:
+        result = [item for item in list_of_string if keyword in item or (any_match and item in keyword)]
+        if len(result) == 1:
+            return result[0]
+    else:
+        return len([item for item in list_of_string if keyword in item or (any_match and item in keyword)]) > 0
 
 class TestUtils(unittest.TestCase):
     def setUp(self):

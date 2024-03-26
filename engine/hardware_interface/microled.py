@@ -15,7 +15,7 @@ class MicroLEDArray(instrument.Instrument):
         s.prepare_stimulus(numpy.array(self.stimulus_bitmaps))
         while True:
             islast = s.update_uled(1.0/self.machine_config.SCREEN_EXPECTED_FRAME_RATE)
-            self._frame_trigger_pulse()
+            self._frame_timing_pulse()
             if islast:
                 break
         s.release_instrument()
@@ -49,7 +49,7 @@ class MicroLEDArray(instrument.Instrument):
         else:
             trigger_value = 0
         if command =='0':
-            self.sent_packets.append('{0}{1:4x}{2}\n'.format(command, trigger_value, pixels).replace(' ', '0'))
+            self.sent_packets.append('{0}{1:0=4x}{2}\n'.format(command, trigger_value, pixels))
         elif command == '9':
             self.sent_packets.append('{0}\n'.format(command))
         self.s.write(self.sent_packets[-1])
@@ -135,7 +135,6 @@ class Testuled(unittest.TestCase):
         from threading import Thread
         from visexpman.engine.generic.introspect import Timer
         enable_measurement=not False
-        
         self.queues = {'command':Queue(), 'data': Queue(), }
         self.process = Thread(target=lightmeter.lightmeter_acquisition_process,  args = (config, self.queues))
         if enable_measurement:
@@ -161,10 +160,10 @@ class Testuled(unittest.TestCase):
             while not self.queues['data'].empty():
                 self.data.append(self.queues['data'].get())
             self.data=numpy.array(self.data)
-            from visexpA.engine.datahandlers import hdf5io
-            from visexpman.engine.generic import file
+            import hdf5io
+            from visexpman.engine.generic import fileop
             from visexpman.engine.generic import utils
-            h=hdf5io.Hdf5io(file.generate_filename('v:\\debug\\uled\\timing.hdf5'), filelocking=False)
+            h=hdf5io.Hdf5io(fileop.generate_filename('v:\\debug\\uled\\timing.hdf5'), filelocking=False)
             self.sent_packets = utils.object2array(s.sent_packets)
             vns=['pause', 'timing', 'repeats', 'blocktimes', 'data', 'sent_packets']
             for vn in vns:
@@ -178,7 +177,7 @@ class Testuled(unittest.TestCase):
             
     @unittest.skip('')
     def test_02_eval_timing(self):
-        from visexpA.engine.datahandlers import hdf5io
+        import hdf5io
         p='/mnt/datafast/debug/uled/timing_00001.hdf5'
         p='v:\\debug\\uled\\timing_00001.hdf5'
         h=hdf5io.Hdf5io(p, filelocking=False)
@@ -195,6 +194,7 @@ class Testuled(unittest.TestCase):
         print numpy.diff(edges)[::2][::reps]/16*1000
         plot(data[:, 0], data[:, 1])
         show()
+
         
 if __name__ == '__main__':
     unittest.main()
