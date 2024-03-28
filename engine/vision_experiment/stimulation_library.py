@@ -17,6 +17,7 @@ except ImportError:
     print('opengl not installed')
 from contextlib import closing
 import tables
+import h5py as h5
 
 import experiment_control
 from visexpman.engine.generic import graphics,utils,colors,fileop, signal,geometry,videofile
@@ -329,8 +330,9 @@ class Stimulations(experiment_control.StimulationControlHelper):#, screen.Screen
         elif os.path.isfile(path) and os.path.splitext(path)=='.hdf5': # a hdf5 file with stimulus_frames variable having nframes * x * y dimensions
             if self.machine_config.ENABLE_TIME_INDEXING:
                 raise NotImplementedError()
-            with closing(tables.open_file(path,'r')) as handler:
-                full_chunk = 0
+            with h5.File(path,'r') as handler:
+                if key_epoch == None:
+                    full_chunk = 0
                 if full_chunk: # read big chunk
                     allframedata = handler.root.stimulus_frames[:5000].astype(float)/255
                 for f1i in range(handler.root.stimulus_frames.shape[0]):
@@ -1602,7 +1604,117 @@ class Stimulations(experiment_control.StimulationControlHelper):#, screen.Screen
         self._deinit_texture()
         if save_frame_info:
             self._save_stimulus_frame_info(inspect.currentframe(), is_last = True)
-            
+    
+    def show_white_noise_shifted(self, path, key_series, key_epoch, position = utils.rc((0, 0)),  stretch=1.0, offset=0, length=0,
+            flip = True, background_color=0.5):
+        """
+        Reads out gaze-shifted white noise stimulus using h5py
+    
+        duration: duration of white noise stimulus in seconds
+        square_size: size of squares. Number of squares is calculated from screen size but 
+        fractional squares are not displayed. The array of squares is centered
+        """
+        '''        
+        Three use cases are handled here:
+            - showing individual image files
+                duration: duration of showing individual image file
+                path: path of image file
+            - showing the content of a folder
+                duration: duration of showing each image file in folder
+                path: path of folder containing images
+            - path is a hdf5 file containing a 3d numpy array which is loaded frame by frame
+        Image is shown for one frame time if duration is 0.
+        Further parameters:
+            position: position of image on screen in pixels.
+            stretch: stretch of image, 1 means no scaling, 0.5 means half size
+        Example:
+            Show a single image  for 1 second in a centered position:
+                self.show_image('c:\\images\\frame.png',  duration = 1.0,  position = (0, 0))
+            Play the content of a directory (directory_path) which contains image files. 
+            Each image is shown for one frame time:
+                show_image('c:\\images',  duration = 0,  position = (0, 0))
+        '''
+        #Generate log messages
+        if background_color != None:
+            background_color_saved = glGetFloatv(GL_COLOR_CLEAR_VALUE)
+            converted_background_color = colors.convert_color(background_color, self.config)
+            glClearColor(converted_background_color[0], converted_background_color[1], converted_background_color[2], 0.0)
+        if self.machine_config.ENABLE_TIME_INDEXING:
+            raise NotImplementedError()
+        with h5.File(path,'r') as handler:
+            stim = handler[key_series][key_epoch]['stim'][:]
+            duration = stim.shape[0]/1800
+            flips_per_frame = duration/(1.0/self.config.SCREEN_EXPECTED_FRAME_RATE)
+            if flips_per_frame != numpy.round(flips_per_frame):
+                raise RuntimeError('This duration is not possible, it should be the multiple of 1/SCREEN_EXPECTED_FRAME_RATE')                
+            self.log.info('show_white_noise_shifted(' + str(path)+ ', ' + str(duration) + ', ' + str(position) + ', ' + str(stretch)  + ', ' + ')', source='stim')
+            self._save_stimulus_frame_info(inspect.currentframe())
+            # full_chunk = 0
+            # if full_chunk: # read big chunk
+            #     allframedata = handler.root.stimulus_frames[:5000].astype(float)/255
+            for f1i in range(duration):
+                mytime = time.time()
+                # if full_chunk:
+                #     framedata = allframedata[f1i]
+                # else:
+                #     framedata = handler.root.stimulus_frames[f1i].astype(float)/255  # put actual image frames into the list of paths
+                framedata = stim[f1i]
+                if self.config.VERTICAL_AXIS_POSITIVE_DIRECTION == 'down':
+                    framedata = framedata[::-1]  # flip row order = flip image TOP to Bottom
+                self._show_image(numpy.rollaxis(numpy.tile(framedata,(3,1,1)),0,3), duration, position, stretch, flip)
+                print(1./(time.time() - mytime))
+                if self.abort:
+                    break
+            self.screen.clear_screen()
+            self._flip(frame_timing_pulse=True)
+    
+    def show_natural_scene_movie(self, path, key_series, key_epoch, position = utils.rc((0, 0)),  stretch=1.0, offset=0, length=0,
+            flip = True, background_color=0.5):
+        """
+        Reads out gaze-shifted natural scenes stimulus using h5py
+    
+        duration: duration of white noise stimulus in seconds
+        square_size: size of squares. Number of squares is calculated from screen size but 
+        fractional squares are not displayed. The array of squares is centered
+        """
+                #Generate log messages
+        if background_color != None:
+            background_color_saved = glGetFloatv(GL_COLOR_CLEAR_VALUE)
+            converted_background_color = colors.convert_color(background_color, self.config)
+            glClearColor(converted_background_color[0], converted_background_color[1], converted_background_color[2], 0.0)
+        if self.machine_config.ENABLE_TIME_INDEXING:
+            raise NotImplementedError()
+        with h5.File(path,'r') as handler:
+            stim = handler[key_series][key_epoch]['stim'][:]
+            duration = stim.shape[0]/1800
+            flips_per_frame = duration/(1.0/self.config.SCREEN_EXPECTED_FRAME_RATE)
+            if flips_per_frame != numpy.round(flips_per_frame):
+                raise RuntimeError('This duration is not possible, it should be the multiple of 1/SCREEN_EXPECTED_FRAME_RATE')                
+            self.log.info('show_white_noise_shifted(' + str(path)+ ', ' + str(duration) + ', ' + str(position) + ', ' + str(stretch)  + ', ' + ')', source='stim')
+            self._save_stimulus_frame_info(inspect.currentframe())
+            # full_chunk = 0
+            # if full_chunk: # read big chunk
+            #     allframedata = handler.root.stimulus_frames[:5000].astype(float)/255
+            for f1i in range(duration):
+                mytime = time.time()
+                # if full_chunk:
+                #     framedata = allframedata[f1i]
+                # else:
+                #     framedata = handler.root.stimulus_frames[f1i].astype(float)/255  # put actual image frames into the list of paths
+                framedata = stim[f1i]
+                if self.config.VERTICAL_AXIS_POSITIVE_DIRECTION == 'down':
+                    framedata = framedata[::-1]  # flip row order = flip image TOP to Bottom
+                self._show_image(numpy.rollaxis(numpy.tile(framedata,(3,1,1)),0,3), duration, position, stretch, flip)
+                print(1./(time.time() - mytime))
+                if self.abort:
+                    break
+            self.screen.clear_screen()
+            self._flip(frame_timing_pulse=True)
+
+
+
+
+
 class StimulationHelpers(Stimulations):
     def _init_texture(self,size,orientation=0,texture_coordinates=None, set_vertices=True,enable_texture=True):
         from visexpman.engine.generic import geometry

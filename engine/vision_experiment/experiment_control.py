@@ -25,7 +25,7 @@ from visexpman.engine.vision_experiment.screen import CaImagingScreen
 try:
     import hdf5io
 except ImportError:
-    print 'hdf5io not installed'
+    print('hdf5io not installed')
 
 from visexpman.engine.generic.command_parser import ServerLoop
 try:
@@ -92,7 +92,7 @@ class CaImagingLoop(ServerLoop, CaImagingScreen):#OBSOLETE
                 else:
                     self.live_scan_start(self.imaging_parameters)
             else:
-                print key_pressed
+                print(key_pressed)
                 
         if self.abort:
             if self.imaging_started:
@@ -639,7 +639,7 @@ class StimulationControlHelper(Trigger,queued_socket.QueuedSocketHelpers):
             except:
                 self.send({'trigger':'stim error'})
                 exc_info = sys.exc_info()
-                raise exc_info[0], exc_info[1], exc_info[2]#And reraise exception such that higher level modules could display it
+                raise exc_info[0] #, exc_info[1], exc_info[2]#And reraise exception such that higher level modules could display it
             self.log.resume()
             #Terminate recording devices
             if self.machine_config.PLATFORM in ['elphys_retinal_ca', 'mc_mea', 'us_cortical', 'ao_cortical']:
@@ -683,7 +683,7 @@ class StimulationControlHelper(Trigger,queued_socket.QueuedSocketHelpers):
                     raise RuntimeError('Mean frame rate {0} does not match with expected frame {1}'.format(self.frame_rates.mean(), expfr))
         except:
             exc_info = sys.exc_info()
-            raise exc_info[0], exc_info[1], exc_info[2]#And reraise exception such that higher level modules could display it
+            raise exc_info[0] #, exc_info[1], exc_info[2]#And reraise exception such that higher level modules could display it
         finally:
             self.close()#If something goes wrong, close serial port
 
@@ -876,10 +876,10 @@ if test_mode:
             self._scanning_params()
             
         def tearDown(self):
-            print 1
+            print(1)
             if hasattr(self, 'context'):
                 visexpman.engine.stop_application(self.context)
-                print 2
+                print(2)
             introspect.kill_python_processes(self.dont_kill_processes)
             
         def _send_commands_to_stim(self, commands):
@@ -1069,7 +1069,7 @@ if test_mode:
             self.assertEqual(numpy.array(map(os.path.getsize,datafiles)).argmax(),2)
             #check content of datafiles
             for datafile in datafiles:
-                print datafile
+                print(datafile)
                 h=hdf5io.Hdf5io(datafile,filelocking=False)
                 saved_parameters = h.findvar('imaging_parameters')
                 nframes = h.findvar('imaging_run_info')['acquired_frames']
