@@ -7,7 +7,7 @@ class Fullfield(experiment.Stimulus):
         self.HEIGHT=2000#pixel
         self.ONTIME=2.0#seconds
         self.OFFTIME=2.5#seconds
-        self.REPEATS=50
+        self.REPEATS=500
         self.WAIT=0.5#wait time in seconds at beginning and end of stimulus
         self.BACKGROUND=0.0
 #Do not edit below this!
