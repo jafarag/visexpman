@@ -14,10 +14,9 @@ try:
     default_text=GLUT_BITMAP_TIMES_ROMAN_24
 except ImportError:
     default_text=None
-    print('opengl not installed')
+    print 'opengl not installed'
 from contextlib import closing
 import tables
-import h5py as h5
 
 import experiment_control
 from visexpman.engine.generic import graphics,utils,colors,fileop, signal,geometry,videofile
@@ -330,9 +329,8 @@ class Stimulations(experiment_control.StimulationControlHelper):#, screen.Screen
         elif os.path.isfile(path) and os.path.splitext(path)=='.hdf5': # a hdf5 file with stimulus_frames variable having nframes * x * y dimensions
             if self.machine_config.ENABLE_TIME_INDEXING:
                 raise NotImplementedError()
-            with h5.File(path,'r') as handler:
-                if key_epoch == None:
-                    full_chunk = 0
+            with closing(tables.open_file(path,'r')) as handler:
+                full_chunk = 0
                 if full_chunk: # read big chunk
                     allframedata = handler.root.stimulus_frames[:5000].astype(float)/255
                 for f1i in range(handler.root.stimulus_frames.shape[0]):
@@ -744,7 +742,7 @@ class Stimulations(experiment_control.StimulationControlHelper):#, screen.Screen
                     coo=numpy.cast['int'](numpy.array([r*numpy.cos(angle+o)+size_pixel,r*numpy.sin(angle+o)+size_pixel]))
                     coo=[numpy.where(numpy.logical_and(coo[i]>2*size_pixel, coo[i]<0),0,coo[i]) for i in range(2)]
                     texture[coo[0],coo[1]]=numpy.cos(o/max_angle*numpy.pi)
-            print(t0-time.time())
+            print t0-time.time()    
             texture=signal.scale(texture,color_min,color_max)
             texture=texture[size_pixel/2:3*size_pixel/2,size_pixel/2:3*size_pixel/2]
             mask=geometry.circle_mask([size_pixel/2]*2,size_pixel/2,2*[size_pixel])
@@ -1394,7 +1392,7 @@ class Stimulations(experiment_control.StimulationControlHelper):#, screen.Screen
             self._flip(False)
             if self.abort:
                 break
-        print(i/(time.time()-t0))
+        print i/(time.time()-t0)
         self._deinit_texture()
         if save_frame_info:
             self._save_stimulus_frame_info(inspect.currentframe(), is_last = True)
@@ -1531,7 +1529,7 @@ class Stimulations(experiment_control.StimulationControlHelper):#, screen.Screen
             texture=texture1+texture2+background_color
         else:
             texture=texture1+texture2
-        print ('m', texture.max(), texture1.max(), texture2.max(),profile.max())
+        print 'm', texture.max(), texture1.max(), texture2.max(),profile.max()
         cut=int(texture_width*(1-1.0/extension_factor)/2)
         merged_period=line_spacing_p/numpy.sin(numpy.radians(relative_angle/2))
         nreps=int(0.5*self.config.SCREEN_RESOLUTION['col']/merged_period)#Texture is reassambled from half screen wide segments
@@ -1561,7 +1559,7 @@ class Stimulations(experiment_control.StimulationControlHelper):#, screen.Screen
             tout[:,:,i]=texture
         texture=tout
 #        texture=numpy.rollaxis(numpy.array(3*[texture]),0,3)
-        print(t0-time.time())
+        print t0-time.time()
         if hasattr(self.config, 'GAMMA_CORRECTION'):
             texture = self.config.GAMMA_CORRECTION(texture)
         glTexImage2D(GL_TEXTURE_2D, 0, 3, texture.shape[1], texture.shape[0], 0, GL_RGB, GL_FLOAT, texture)
@@ -1604,69 +1602,74 @@ class Stimulations(experiment_control.StimulationControlHelper):#, screen.Screen
         self._deinit_texture()
         if save_frame_info:
             self._save_stimulus_frame_info(inspect.currentframe(), is_last = True)
-    
+            
     def show_white_noise_shifted(self, path, key_series, key_epoch, position = utils.rc((0, 0)),  stretch=1.0, offset=0, length=0,
-            flip = True, background_color=0.5):
-        """
-        Reads out gaze-shifted white noise stimulus using h5py
-    
-        duration: duration of white noise stimulus in seconds
-        square_size: size of squares. Number of squares is calculated from screen size but 
-        fractional squares are not displayed. The array of squares is centered
-        """
-        '''        
-        Three use cases are handled here:
-            - showing individual image files
-                duration: duration of showing individual image file
-                path: path of image file
-            - showing the content of a folder
-                duration: duration of showing each image file in folder
-                path: path of folder containing images
-            - path is a hdf5 file containing a 3d numpy array which is loaded frame by frame
-        Image is shown for one frame time if duration is 0.
-        Further parameters:
-            position: position of image on screen in pixels.
-            stretch: stretch of image, 1 means no scaling, 0.5 means half size
-        Example:
-            Show a single image  for 1 second in a centered position:
-                self.show_image('c:\\images\\frame.png',  duration = 1.0,  position = (0, 0))
-            Play the content of a directory (directory_path) which contains image files. 
-            Each image is shown for one frame time:
-                show_image('c:\\images',  duration = 0,  position = (0, 0))
-        '''
-        #Generate log messages
-        if background_color != None:
-            background_color_saved = glGetFloatv(GL_COLOR_CLEAR_VALUE)
-            converted_background_color = colors.convert_color(background_color, self.config)
-            glClearColor(converted_background_color[0], converted_background_color[1], converted_background_color[2], 0.0)
-        if self.machine_config.ENABLE_TIME_INDEXING:
-            raise NotImplementedError()
-        with h5.File(path,'r') as handler:
-            stim = handler[key_series][key_epoch]['stim'][:]
-            duration = stim.shape[0]/1800
-            flips_per_frame = duration/(1.0/self.config.SCREEN_EXPECTED_FRAME_RATE)
-            if flips_per_frame != numpy.round(flips_per_frame):
-                raise RuntimeError('This duration is not possible, it should be the multiple of 1/SCREEN_EXPECTED_FRAME_RATE')                
-            self.log.info('show_white_noise_shifted(' + str(path)+ ', ' + str(duration) + ', ' + str(position) + ', ' + str(stretch)  + ', ' + ')', source='stim')
-            self._save_stimulus_frame_info(inspect.currentframe())
-            # full_chunk = 0
-            # if full_chunk: # read big chunk
-            #     allframedata = handler.root.stimulus_frames[:5000].astype(float)/255
-            for f1i in range(duration):
-                mytime = time.time()
-                # if full_chunk:
-                #     framedata = allframedata[f1i]
-                # else:
-                #     framedata = handler.root.stimulus_frames[f1i].astype(float)/255  # put actual image frames into the list of paths
-                framedata = stim[f1i]
-                if self.config.VERTICAL_AXIS_POSITIVE_DIRECTION == 'down':
-                    framedata = framedata[::-1]  # flip row order = flip image TOP to Bottom
-                self._show_image(numpy.rollaxis(numpy.tile(framedata,(3,1,1)),0,3), duration, position, stretch, flip)
-                print(1./(time.time() - mytime))
-                if self.abort:
-                    break
-            self.screen.clear_screen()
-            self._flip(frame_timing_pulse=True)
+                    flip = True, background_color=0.5):
+                """
+                Reads out gaze-shifted white noise stimulus using h5py
+            
+                duration: duration of white noise stimulus in seconds
+                square_size: size of squares. Number of squares is calculated from screen size but 
+                fractional squares are not displayed. The array of squares is centered
+                """
+                '''        
+                Three use cases are handled here:
+                    - showing individual image files
+                        duration: duration of showing individual image file
+                        path: path of image file
+                    - showing the content of a folder
+                        duration: duration of showing each image file in folder
+                        path: path of folder containing images
+                    - path is a hdf5 file containing a 3d numpy array which is loaded frame by frame
+                Image is shown for one frame time if duration is 0.
+                Further parameters:
+                    position: position of image on screen in pixels.
+                    stretch: stretch of image, 1 means no scaling, 0.5 means half size
+                Example:
+                    Show a single image  for 1 second in a centered position:
+                        self.show_image('c:\\images\\frame.png',  duration = 1.0,  position = (0, 0))
+                    Play the content of a directory (directory_path) which contains image files. 
+                    Each image is shown for one frame time:
+                        show_image('c:\\images',  duration = 0,  position = (0, 0))
+                '''
+                #Generate log messages
+                if background_color != None:
+                    background_color_saved = glGetFloatv(GL_COLOR_CLEAR_VALUE)
+                    converted_background_color = colors.convert_color(background_color, self.config)
+                    glClearColor(converted_background_color[0], converted_background_color[1], converted_background_color[2], 0.0)
+                if self.machine_config.ENABLE_TIME_INDEXING:
+                    raise NotImplementedError()
+                with tables.open_file(path,'r') as handler:
+                    stim = getattr(getattr(getattr(handler.root,key_series),key_epoch),'stim')[:]
+                    # stim = handler[key_series][key_epoch]['stim'][:]
+                    duration = float(2/self.config.SCREEN_EXPECTED_FRAME_RATE)
+                    flips_per_frame = duration/(1.0/self.config.SCREEN_EXPECTED_FRAME_RATE)
+                    if flips_per_frame != numpy.round(flips_per_frame):
+                        raise RuntimeError('This duration is not possible, it should be the multiple of 1/SCREEN_EXPECTED_FRAME_RATE')                
+                    self.log.info('show_white_noise_shifted(' + str(path)+ ', ' + str(duration) + ', ' + str(position) + ', ' + str(stretch)  + ', ' + ')', source='stim')
+                    self._save_stimulus_frame_info(inspect.currentframe())
+                    # full_chunk = 0
+                    # if full_chunk: # read big chunk
+                    #     allframedata = handler.root.stimulus_frames[:5000].astype(float)/255
+                    n_frames = int(stim.shape[0])
+                    for f1i in range(n_frames):
+                        mytime = time.time()
+                        # if full_chunk:
+                        #     framedata = allframedata[f1i]
+                        # else:
+                        #     framedata = handler.root.stimulus_frames[f1i].astype(float)/255  # put actual image frames into the list of paths
+                        framedata = stim[f1i]
+                        if self.config.VERTICAL_AXIS_POSITIVE_DIRECTION == 'down':
+                            framedata = framedata[::-1]  # flip row order = flip image TOP to Bottom
+                        self.config.SCREEN_EXPECTED_FRAME_RATE = 30.0
+                        duration = float(1/self.config.SCREEN_EXPECTED_FRAME_RATE)
+                        self._show_image(numpy.rollaxis(numpy.tile(framedata,(3,1,1)),0,3), duration, position, stretch, flip)
+                        print(1./(time.time() - mytime))
+                        if self.abort:
+                            break
+                    self.screen.clear_screen()
+                    self._flip(frame_timing_pulse=True)
+                handler.close()
     
     def show_natural_scene_movie(self, path, key_series, key_epoch, position = utils.rc((0, 0)),  stretch=1.0, offset=0, length=0,
             flip = True, background_color=0.5):
@@ -1684,9 +1687,9 @@ class Stimulations(experiment_control.StimulationControlHelper):#, screen.Screen
             glClearColor(converted_background_color[0], converted_background_color[1], converted_background_color[2], 0.0)
         if self.machine_config.ENABLE_TIME_INDEXING:
             raise NotImplementedError()
-        with h5.File(path,'r') as handler:
-            stim = handler[key_series][key_epoch]['stim'][:]
-            duration = stim.shape[0]/1800
+        with tables.open_file(path,'r') as handler:
+            stim = getattr(getattr(getattr(handler.root,key_series),key_epoch),'stim')[:]
+            duration = float(2/30)
             flips_per_frame = duration/(1.0/self.config.SCREEN_EXPECTED_FRAME_RATE)
             if flips_per_frame != numpy.round(flips_per_frame):
                 raise RuntimeError('This duration is not possible, it should be the multiple of 1/SCREEN_EXPECTED_FRAME_RATE')                
@@ -1695,24 +1698,79 @@ class Stimulations(experiment_control.StimulationControlHelper):#, screen.Screen
             # full_chunk = 0
             # if full_chunk: # read big chunk
             #     allframedata = handler.root.stimulus_frames[:5000].astype(float)/255
-            for f1i in range(duration):
+            n_frames = int(stim.shape[0])
+            for f1i in range(n_frames):
                 mytime = time.time()
                 # if full_chunk:
                 #     framedata = allframedata[f1i]
                 # else:
                 #     framedata = handler.root.stimulus_frames[f1i].astype(float)/255  # put actual image frames into the list of paths
-                framedata = stim[f1i]
-                if self.config.VERTICAL_AXIS_POSITIVE_DIRECTION == 'down':
-                    framedata = framedata[::-1]  # flip row order = flip image TOP to Bottom
-                self._show_image(numpy.rollaxis(numpy.tile(framedata,(3,1,1)),0,3), duration, position, stretch, flip)
+                framedata = stim[f1i].astype(float)/255
+                # if self.config.VERTICAL_AXIS_POSITIVE_DIRECTION == 'down':
+                framedata = framedata[::-1,:,:]  # flip row order = flip image TOP to Bottom
+                framedata = framedata[:,:,[2,1,0]] #0,2,1 no 2,0,1 no, 1,2,0 no , 1,0,2, 
+                self.config.SCREEN_EXPECTED_FRAME_RATE = 30.0
+                duration = float(1/self.config.SCREEN_EXPECTED_FRAME_RATE)
+                self._show_image(framedata, duration, position, stretch, flip)
                 print(1./(time.time() - mytime))
                 if self.abort:
                     break
             self.screen.clear_screen()
             self._flip(frame_timing_pulse=True)
+        handler.close()
 
-
-
+    def show_white_noise_YOUSSEF(self, square_size, frame_rate, duration=25,screen_size=None, save_frame_info=True,background_color=0.5):
+        '''
+        Generates white noise stimulus using numpy.random.random
+        
+        duration: duration of white noise stimulus in seconds
+        square_size: size of squares. Number of squares is calculated from screen size but 
+        fractional squares are not displayed. The array of squares is centered
+        '''
+        self.config.SCREEN_EXPECTED_FRAME_RATE = frame_rate
+        if background_color != None:
+            background_color_saved = glGetFloatv(GL_COLOR_CLEAR_VALUE)
+            converted_background_color = colors.convert_color(background_color, self.config)
+            glClearColor(converted_background_color[0], converted_background_color[1], converted_background_color[2], 0.0)
+        if save_frame_info:
+            self.log.info('show_white_noise(' + str(duration)+ ', ' + str(square_size) + ')', source = 'stim')
+            self._save_stimulus_frame_info(inspect.currentframe())
+        square_size_pixel = square_size*self.machine_config.SCREEN_UM_TO_PIXEL_SCALE
+        nframes = int(frame_rate*duration)
+        if screen_size == None:
+            screen_size=self.machine_config.SCREEN_SIZE_UM
+        ncheckers = utils.rc_x_const(screen_size, 1.0/square_size)
+        ncheckers = utils.rc((numpy.floor(ncheckers['row']), numpy.floor(ncheckers['col'])))
+        checker_colors = numpy.where(numpy.random.random((nframes,int(ncheckers['row']),int(ncheckers['col'])))<0.5, False,True)
+        row_coords = numpy.arange(ncheckers['row'])-0.5*(ncheckers['row'] - 1)
+        col_coords = numpy.arange(ncheckers['col'])-0.5*(ncheckers['col'] -1)
+        rc, cc = numpy.meshgrid(row_coords, col_coords)
+        positions=numpy.rollaxis(numpy.array([rc,cc]),0,3)*square_size
+        params = {'colors': checker_colors, 'ncheckers':ncheckers, 'positions': positions}
+        if save_frame_info:
+            self._append_to_stimulus_frame_info(params)
+        size = utils.rc_x_const(ncheckers, square_size_pixel)
+        self._init_texture(size)
+        self.t0=time.time()
+        for frame_i in range(nframes):
+            # if self.machine_config.ENABLE_TIME_INDEXING:
+            #     index=self._get_frame_index()
+            # else:
+            index=frame_i
+            texture = checker_colors[index]
+            texture = numpy.rollaxis(numpy.array(3*[numpy.cast['float'](texture)]), 0,3)
+            glTexImage2D(GL_TEXTURE_2D, 0, 3, texture.shape[1], texture.shape[0], 0, GL_RGB, GL_FLOAT, texture)
+            glClear (GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+            glColor3fv((1.0,1.0,1.0))
+            glDrawArrays(GL_POLYGON,  0, 4)
+            self.draw()
+            self._flip(frame_timing_pulse = True)
+            if self.abort:
+                break
+        self._deinit_texture()
+        if save_frame_info:
+            self._save_stimulus_frame_info(inspect.currentframe(), is_last = True)
+            self._append_to_stimulus_frame_info(params)
 
 
 class StimulationHelpers(Stimulations):
@@ -2133,12 +2191,12 @@ class AdvancedStimulation(StimulationHelpers):
         self.ncolumns=ncolumns
         self.shape_size=shape_size
         if 0:
-            print(corners_um[:,0].min(), corners_um[:,0].max(), self.machine_config.SCREEN_SIZE_UM['row'])
-            print(corners_um[:,1].min(), corners_um[:,1].max(), self.machine_config.SCREEN_SIZE_UM['col'])
+            print corners_um[:,0].min(), corners_um[:,0].max(), self.machine_config.SCREEN_SIZE_UM['row']
+            print corners_um[:,1].min(), corners_um[:,1].max(), self.machine_config.SCREEN_SIZE_UM['col']
         self.show_fullscreen(color = background_color, duration = off_time)
         for r1 in range(sequence_repeat):
             for angle,shape_size_i, color,p in positions_and_colors:
-                    print(angle)
+                    print angle
                     #print shape_size_i['row']
             #for p in positions:
              #   for color in shape_colors:
@@ -2441,9 +2499,9 @@ if test_mode:
             if 0:
                 for s in sfi:
                     if s.has_key('block_start') or s.has_key('block_end'):
-                        print(s.keys())
+                        print s.keys()
                     else:
-                        print(s['stimulus_type'])
+                        print s['stimulus_type']
             self.assertEqual(len([s for s in sfi if 'block_start' in s]), expected_number_of_blocks)
             self.assertEqual(len([s for s in sfi if 'block_end' in s]), expected_number_of_blocks)
             #block start and block end entries must be adjacent, no stimulus info should be in between
